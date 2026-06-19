@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AetherDB Platform Dashboard</title>
+    <!-- Outfit & Inter Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Inter:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="background-glow"></div>
+    
+    <!-- Navigation -->
+    <nav class="navbar">
+        <div class="nav-container">
+            <span class="logo">Aether<span class="logo-accent">DB</span></span>
+            <div class="user-status" id="user-status-area">
+                <span class="status-indicator offline"></span>
+                <span class="status-text">Disconnected</span>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Container -->
+    <main class="main-container">
+        
+        <!-- Authentication Section (Register/Login Card) -->
+        <section class="auth-section" id="auth-view">
+            <div class="auth-card">
+                <div class="auth-tabs">
+                    <button class="tab-btn active" onclick="switchTab('login')">Login</button>
+                    <button class="tab-btn" onclick="switchTab('register')">Register</button>
+                </div>
+                
+                <!-- Login Form -->
+                <form id="login-form" class="auth-form" onsubmit="handleAuth(event, 'login')">
+                    <h2>Welcome Back</h2>
+                    <p class="subtitle">Access your isolated database workspace</p>
+                    <div class="input-group">
+                        <label for="login-username">Tenant ID (Username)</label>
+                        <input type="text" id="login-username" required placeholder="e.g. tenant_1">
+                    </div>
+                    <div class="input-group">
+                        <label for="login-password">Password</label>
+                        <input type="password" id="login-password" required placeholder="••••••••">
+                    </div>
+                    <button type="submit" class="submit-btn glow-btn">Authenticate</button>
+                </form>
+
+                <!-- Register Form -->
+                <form id="register-form" class="auth-form hidden" onsubmit="handleAuth(event, 'register')">
+                    <h2>Create Tenant Account</h2>
+                    <p class="subtitle">Provision a secure isolated keyspace</p>
+                    <div class="input-group">
+                        <label for="register-username">Desired Tenant ID</label>
+                        <input type="text" id="register-username" required placeholder="e.g. tenant_1">
+                    </div>
+                    <div class="input-group">
+                        <label for="register-password">Password</label>
+                        <input type="password" id="register-password" required placeholder="••••••••">
+                    </div>
+                    <button type="submit" class="submit-btn glow-btn">Register Tenant</button>
+                </form>
+                
+                <div class="auth-message error hidden" id="auth-error"></div>
+                <div class="auth-message success hidden" id="auth-success"></div>
+            </div>
+        </section>
+
+        <!-- Database Workspace Section (Dashboard) -->
+        <section class="dashboard-section hidden" id="dashboard-view">
+            <div class="dashboard-grid">
+                
+                <!-- Database Operations Panel -->
+                <div class="dashboard-card glass-panel span-2-col">
+                    <div class="card-header">
+                        <h3>Database Operations</h3>
+                        <span class="badge badge-accent">Interactive CLI</span>
+                    </div>
+                    
+                    <div class="ops-form">
+                        <div class="input-row">
+                            <div class="input-group flex-1">
+                                <label for="op-key">Target Key</label>
+                                <input type="text" id="op-key" placeholder="Enter key (e.g., config_mode)">
+                            </div>
+                            <div class="input-group flex-2">
+                                <label for="op-value">Value (Only for SET)</label>
+                                <input type="text" id="op-value" placeholder="Enter string value (supports spaces)">
+                            </div>
+                        </div>
+
+                        <div class="btn-group">
+                            <button onclick="executeOp('SET')" class="op-btn set-btn">SET</button>
+                            <button onclick="executeOp('GET')" class="op-btn get-btn">GET</button>
+                            <button onclick="executeOp('DEL')" class="op-btn del-btn">DEL</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Session Stats Panel -->
+                <div class="dashboard-card glass-panel">
+                    <div class="card-header">
+                        <h3>Telemetry</h3>
+                    </div>
+                    <div class="telemetry-stats">
+                        <div class="stat-item">
+                            <span class="stat-label">Last Operation Latency</span>
+                            <span class="stat-val accent-text" id="latency-text">0.00 ms</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Connection Namespace</span>
+                            <span class="stat-val" id="namespace-text">N/A</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Client Session Pool</span>
+                            <span class="stat-val green-text">Healthy</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Session Registry Table -->
+                <div class="dashboard-card glass-panel span-2-col">
+                    <div class="card-header">
+                        <h3>Tenant Key Registry</h3>
+                        <p class="subtitle">Keys managed or queried in this session</p>
+                    </div>
+                    <div class="table-container">
+                        <table class="data-table" id="registry-table">
+                            <thead>
+                                <tr>
+                                    <th>Session Key</th>
+                                    <th>Last Value</th>
+                                    <th>Last Updated</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr id="no-keys-row">
+                                    <td colspan="4" class="text-center text-muted">No keys queried in this session yet. Try executing GET/SET operations.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Console Ticker Log -->
+                <div class="dashboard-card glass-panel terminal-card">
+                    <div class="card-header">
+                        <h3>Engine Log Ticker</h3>
+                    </div>
+                    <div class="terminal-body" id="console-logs">
+                        <div class="log-line system">[System] Connection established to REST API Gateway.</div>
+                    </div>
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
