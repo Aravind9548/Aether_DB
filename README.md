@@ -1,77 +1,94 @@
-# AetherDB
+# AetherDB-Platform
 
-AetherDB is a lightweight, high-performance, sharded concurrent key-value database built in C++17. It supports strict durability guarantees (via WAL fsync), graceful signal-driven shutdown, and automated background snapshot compaction.
+AetherDB-Platform is a production-grade, highly concurrent, secure, and persistent key-value platform. It orchestrates a C++17 sharded database engine, a PostgreSQL user registry, and a Java Spring Boot 3 API Gateway implementing JWT authentication, multi-tenant isolation, and non-blocking connection pooling.
 
 ---
 
-## 🏗️ Design Decisions
+## 🏗️ System Architecture & Data Flow
 
-### 1. Sharded Locks instead of one Mutex
-**Naive Approach:** Protect a single `std::unordered_map` with a single lock.
-**Problem:** In C++, inserting/erasing in `std::unordered_map` can trigger a table rehash. If one thread triggers a rehash while another thread is reading a different key on the same map, it leads to memory corruption or crashes.
-**Solution:** We shard the keyspace into 16 independent maps, each protected by its own `std::shared_mutex`. Keys hash to a specific shard. Concurrent operations on different shards run in parallel without contention, and rehashes are completely isolated.
+```
+[HTTP Client] ──(JSON over HTTPS)──> [Spring Boot API Service]
+                                              │
+                                              ├── (1. Authentication via Spring Security/JWT)
+                                              ├── (2. Multi-tenant key prefix isolation)
+                                              ▼
+                                    [Java Socket Client Pool]
+                                              │
+                                       (Raw TCP Bytes)
+                                              ▼
+                                    [AetherDB C++ Engine]
+```
 
-### 2. Length-Prefixed Framing instead of Newline-Delimited Text
-**Naive Approach:** Write transactions as raw text delimited by newlines or spaces.
-**Problem:** The moment a key or value contains a space, carriage return, or newline, parsing fails and corrupts the database state.
-**Solution:** We use length-prefixed binary-safe framing for the Write-Ahead Log (WAL) and snapshots:
-```
-S\n<keylen>\n<key bytes><vallen>\n<value bytes>
-```
-The parser reads the exact number of bytes specified by the length prefixes, making it 100% binary-safe.
+- **aether-gateway**: Acts as the single entry point. It handles user authentication, generates JWTs, and acts as a secure reverse proxy that sanitizes user queries and routes them to the C++ core engine.
+- **aether-engine**: The core in-memory sharded storage database, running inside a private Docker bridge network isolated from the host.
+- **postgres**: Stores user registration details and credentials hashed with BCrypt.
+
+---
+
+## 🔒 Production-Grade Design & Security Justifications
+
+### 1. Sharded Locks instead of one Mutex (C++ Engine)
+* **What breaks:** Protect a single map with a single lock. Under high concurrent write loads, threads block waiting for the table-wide mutex. Furthermore, dynamic map rehashing can corrupt the bucket pointers and cause segfaults in threads concurrently reading other keys.
+* **The Architecture:** The keyspace is sharded across 16 independent map buckets, each guarded by its own read-write `std::shared_mutex`. Rehashes are localized, and contention is minimized.
+
+### 2. Length-Prefixed Binary-Safe Framing (C++ Persistence)
+* **What breaks:** Write WAL transactions as raw text separated by spaces or newlines. If a value contains space or newline characters, parsing fails during crash recovery and corrupts the state.
+* **The Architecture:** Transactions are stored using length-prefixed headers (`S\n<keylen>\n<key><vallen>\n<val>`). The parser reads the exact number of bytes specified by the length prefixes, allowing raw binary values.
 
 ### 3. Log-Before-Apply Ordering
-**Naive Approach:** Apply updates to the in-memory map first, then append to the WAL.
-**Problem:** If the database crashes after writing to memory but before writing to the log, the client receives an "OK" confirmation, but the data is lost upon server restart.
-**Solution:** We write to the WAL, call `fflush()`, and call `fsync()` before updating the in-memory map. If we crash midway, replay reconstructs the state. If we crash before the WAL write, the client never receives "OK", maintaining strict transaction integrity.
+* **What breaks:** Update the in-memory map first, then log to the WAL. If the server crashes in between, the client gets a success confirmation, but the transaction is lost forever on reboot.
+* **The Architecture:** Update entries are written and `fsync`'ed to disk *before* updating the memory structure. Replay on boot guarantees correctness.
 
-### 4. Atomic Rename for Snapshots instead of Overwriting
-**Naive Approach:** Write snapshot data directly to `aether.snapshot`.
-**Problem:** A sudden crash or power failure while writing the snapshot leaves a half-written, corrupted file, destroying the database backup.
-**Solution:** We write the snapshot to a temporary file `aether.snapshot.tmp`, `fsync()` it, and then call POSIX `rename()` to atomically overwrite the real snapshot. This guarantees we always have either the full previous snapshot or the full new snapshot.
+### 4. Non-Blocking High-Concurrency Gateway Routing (Java Client Pool)
+* **What breaks:** Using standard `synchronized` wrapper declarations across Java network clients forces the application to process every database request sequentially. This creates a severe processing bottleneck at the entry gate, rendering the C++ sharded locking engine useless.
+* **The Architecture:** We built a dedicated, thread-safe connection pool using an internal `BlockingQueue<Socket>`. Threads check out long-lived, pre-allocated socket lines to run concurrent queries completely in parallel before returning them to the pool queue.
 
-### 5. Signal Handlers & Atomic Flags
-**Naive Approach:** Stop sockets, take locks, and print logs directly inside the signal handler.
-**Problem:** POSIX signal handlers can interrupt a thread mid-operation (e.g., inside `malloc` or while holding `std::cout` locks). Accessing non-reentrant functions or locks inside signal handlers causes deadlocks and undefined behavior.
-**Solution:** The signal handler only sets a `std::atomic<bool> shutdown_flag`. A separate watcher thread polls this flag and executes the cleanup and socket shutdowns safely.
+### 5. Length-Prefixed Key Multi-Tenancy Defenses
+* **What breaks:** Using a simple character delimiter to split tenant identities (e.g., `tenantId + ":" + key`) allows an attacker to inject matching delimiter patterns inside user inputs. A user could intentionally look up a key like `:tenant_2:secret` from `tenant_1`'s account to escape their database isolation bubble.
+* **The Architecture:** We adopted our C++ binary logging strategy directly into our Java layer, encoding keys with an explicit length prefix (`len:tenantId:key`). The system parses keys by measuring character lengths instead of searching for character tokens, neutralizing all injection attack paths.
 
----
-
-## 📊 Benchmark Results
-
-Tests were conducted using `scripts/benchmark.py` running 100 concurrent threads executing 10,000 transactions (50% reads, 50% writes) against AetherDB running under WSL (Ubuntu 24.04):
-
-| Metric | Global Mutex (1 shard) | Sharded Locks (16 shards) |
-| :--- | :--- | :--- |
-| **Elapsed Time** | 13.11 seconds | 12.76 seconds |
-| **Throughput** | 762.98 ops/sec | 783.74 ops/sec |
-| **Performance Gain**| Reference | **1.03x Speedup** |
-
-### Why is the sharded speedup minimal?
-Because AetherDB enforces strict durability by invoking `fsync()` on every mutating write. Disk write syncs are blocking filesystem operations that take orders of magnitude longer than memory lock acquisitions. The database is bottlenecked by disk I/O, meaning lock contention is a minor fraction of the total execution time. If we ran in-memory only without `fsync`, the sharded lock manager would show massive speedups.
+### 6. Zero-Trust Network Topologies
+* **What breaks:** Securing your infrastructure only at the API web gateway leaves internal database ports vulnerable if the core network engine is exposed directly on the host interface. Anyone with raw terminal access (`nc` or `telnet`) can connect to port 8080 and wipe the engine data entirely.
+* **The Architecture:** The C++ binary operates inside an isolated Docker bridge network (`aether-mesh`). Sockets bind to internal interfaces, meaning the database cannot be queried directly from the internet, protecting data integrity.
 
 ---
 
-## 🚀 Build and Run
+## 🚀 Setup and Deploy
 
-### Compilation (WSL/Linux only)
+### Prerequisites
+- Docker & Docker Compose
+
+### Step 1: Start the Platform
+Navigate to the root directory containing the `docker-compose.yml` and execute:
 ```bash
-mkdir -p build && cd build
-cmake -DCMAKE_BUILD_TYPE=Release -DENABLE_TSAN=OFF ..
-make
+docker-compose up --build
+```
+This builds and starts the C++ database engine, the PostgreSQL instance, and the Spring Boot API Gateway.
+
+### Step 2: Register a Tenant
+```bash
+curl -X POST http://localhost:8080/auth/register \
+     -H "Content-Type: application/json" \
+     -d '{"username":"tenant_1","password":"password123"}'
 ```
 
-### Running the server
+### Step 3: Login to Obtain JWT
 ```bash
-./AetherDB --shards 16
+JWT=$(curl -X POST http://localhost:8080/auth/login \
+     -H "Content-Type: application/json" \
+     -d '{"username":"tenant_1","password":"password123"}' | jq -r '.token')
 ```
 
-### Running Benchmarks
+### Step 4: Write and Read Isolated Keys
+Write key-value pair:
 ```bash
-python3 scripts/benchmark.py
+curl -X POST "http://localhost:8080/api/v1/storage?key=username" \
+     -H "Authorization: Bearer $JWT" \
+     -H "Content-Type: text/plain" \
+     -d "aravind"
 ```
 
-### Running Durability Demo
+Read key-value pair:
 ```bash
-bash scripts/demo.sh
+curl -H "Authorization: Bearer $JWT" http://localhost:8080/api/v1/storage/username
 ```

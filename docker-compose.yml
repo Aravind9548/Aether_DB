@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  aether-engine:
+    build:
+      context: ./aether-engine
+      dockerfile: Dockerfile
+    volumes:
+      - aether_data:/data
+    # Isolated from the public internet, accessible only within the network mesh
+    networks:
+      - aether-mesh
+    restart: always
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: aether_auth
+      POSTGRES_USER: aether_admin
+      POSTGRES_PASSWORD: secure_password_123
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - aether-mesh
+    restart: always
+
+  api-gateway:
+    build:
+      context: ./aether-gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"  # Publicly exposed API Gateway
+    environment:
+      - AETHER_ENGINE_HOST=aether-engine
+      - AETHER_ENGINE_PORT=8080
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/aether_auth
+      - SPRING_DATASOURCE_USERNAME=aether_admin
+      - SPRING_DATASOURCE_PASSWORD=secure_password_123
+    depends_on:
+      - aether-engine
+      - postgres
+    networks:
+      - aether-mesh
+    restart: always
+
+networks:
+  aether-mesh:
+    driver: bridge
+
+volumes:
+  aether_data:
+  pg_data:
