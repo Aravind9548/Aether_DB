@@ -1,0 +1,20 @@
+# Build directories
+build/
+bin/
+
+# Database files
+*.wal
+*.snapshot
+*.snapshot.tmp
+aether.aof
+
+# Local binaries
+AetherDB
+
+# IDE / system files
+.vs/
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.log
