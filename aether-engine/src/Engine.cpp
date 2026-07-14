@@ -52,6 +52,10 @@ bool Engine::compact() {
     return wal_manager.write_snapshot(lock_manager);
 }
 
+bool Engine::export_snapshot() {
+    return wal_manager.write_snapshot_only(lock_manager);
+}
+
 LockManager& Engine::get_lock_manager() {
     return lock_manager;
 }

@@ -343,6 +343,12 @@ std::string Server::process_line(const std::string& line) {
             return oss.str();
         }
         return "role=STANDALONE\n";
+    } else if (cmd == "SNAPSHOT_EXPORT") {
+        // Non-destructive: writes the snapshot file only, never touches the
+        // WAL (safe in cluster mode - see Engine::export_snapshot). The
+        // actual file is retrieved separately (e.g. `docker cp`), same as
+        // how raft_demo.py already reads a follower's WAL directly.
+        return engine.export_snapshot() ? "OK\n" : "ERR snapshot export failed\n";
     } else if (cmd == "DEL") {
         if (!(iss >> key)) return "ERR syntax error\n";
         auto r = do_delete(key);

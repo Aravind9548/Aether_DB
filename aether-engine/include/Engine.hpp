@@ -24,6 +24,10 @@ public:
     // Compaction
     bool compact();
 
+    // Non-destructive snapshot export (SNAPSHOT_EXPORT command). Safe in
+    // cluster mode, unlike compact(): does not touch or truncate the WAL.
+    bool export_snapshot();
+
     LockManager& get_lock_manager();
     WalManager& get_wal_manager();
 
