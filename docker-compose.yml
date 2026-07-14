@@ -18,6 +18,11 @@ services:
     environment:
       - AETHER_NODE_ID=1
       - AETHER_PEERS=2=aether-engine-2:8080,3=aether-engine-3:8080
+      # Chaos-testing hooks only (chaos_suite.py). Empty/unset by default -
+      # inert unless explicitly exported on the host before `docker compose up`.
+      - AETHER_CHAOS_SNAPSHOT_DELAY_MS=${AETHER_CHAOS_SNAPSHOT_DELAY_MS:-}
+      - AETHER_CHAOS_DELAY_PEER_ID=${AETHER_CHAOS_DELAY_PEER_ID:-}
+      - AETHER_CHAOS_DELAY_MS=${AETHER_CHAOS_DELAY_MS:-}
     volumes:
       - aether_data_1:/data
 
@@ -26,6 +31,9 @@ services:
     environment:
       - AETHER_NODE_ID=2
       - AETHER_PEERS=1=aether-engine-1:8080,3=aether-engine-3:8080
+      - AETHER_CHAOS_SNAPSHOT_DELAY_MS=${AETHER_CHAOS_SNAPSHOT_DELAY_MS:-}
+      - AETHER_CHAOS_DELAY_PEER_ID=${AETHER_CHAOS_DELAY_PEER_ID:-}
+      - AETHER_CHAOS_DELAY_MS=${AETHER_CHAOS_DELAY_MS:-}
     volumes:
       - aether_data_2:/data
 
@@ -34,6 +42,9 @@ services:
     environment:
       - AETHER_NODE_ID=3
       - AETHER_PEERS=1=aether-engine-1:8080,2=aether-engine-2:8080
+      - AETHER_CHAOS_SNAPSHOT_DELAY_MS=${AETHER_CHAOS_SNAPSHOT_DELAY_MS:-}
+      - AETHER_CHAOS_DELAY_PEER_ID=${AETHER_CHAOS_DELAY_PEER_ID:-}
+      - AETHER_CHAOS_DELAY_MS=${AETHER_CHAOS_DELAY_MS:-}
     volumes:
       - aether_data_3:/data
 
