@@ -2,6 +2,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <cstring>
+#include <cstdlib>
+#include <chrono>
 #include <unistd.h>
 
 // v2 (Raft-log) WAL files begin with this magic; files without it are v1.
@@ -95,6 +97,96 @@ void WalManager::append_entry(uint64_t term, uint64_t index, char op,
     write_record_v2(wal_file, rec);
     std::fflush(wal_file);
     fsync(fileno(wal_file));
+}
+
+uint64_t WalManager::append_entry_buffered(uint64_t term, uint64_t index, char op,
+                                           const std::string& key, const std::string& val) {
+    std::unique_lock<std::mutex> lock(wal_mutex);
+    if (!wal_file) {
+        throw std::runtime_error("WAL file not open for append_entry_buffered!");
+    }
+    WalRecord rec{term, index, op, key, val};
+    write_record_v2(wal_file, rec); // fwrite only - no fflush/fsync
+    uint64_t ticket = ++next_ticket;
+    lock.unlock();
+    // Always notify (not just on a full batch): the flusher's own idle-wait
+    // only wakes on notification, so every write must signal it to transition
+    // from idle into its bounded batching window. The max_batch early-exit
+    // is handled inside the flusher's own wait predicate, not here.
+    flush_cv.notify_all();
+    return ticket;
+}
+
+void WalManager::wait_for_durable(uint64_t ticket) {
+    std::unique_lock<std::mutex> lock(wal_mutex);
+    // Deliberately does NOT also wake on !flusher_running: stop_group_commit_
+    // flusher() guarantees a final drain (durable_ticket -> next_ticket)
+    // before the flusher thread exits, so any ticket issued before shutdown
+    // begins is guaranteed to satisfy this predicate for real. Waking early
+    // on !flusher_running instead would let a caller believe its write is
+    // durable before that final drain has actually happened - a caller must
+    // not call this before start_group_commit_flusher() has been started.
+    flush_cv.wait(lock, [&] { return durable_ticket >= ticket; });
+}
+
+void WalManager::flush_now() {
+    std::lock_guard<std::mutex> lock(wal_mutex);
+    if (wal_file && next_ticket > durable_ticket) {
+        std::fflush(wal_file);
+        fsync(fileno(wal_file));
+        durable_ticket = next_ticket;
+        flush_cv.notify_all();
+    }
+}
+
+void WalManager::flusher_loop() {
+    std::unique_lock<std::mutex> lock(wal_mutex);
+    while (flusher_running) {
+        // Idle-wait (unbounded) until a write becomes pending, or shutdown.
+        flush_cv.wait(lock, [&] { return next_ticket > durable_ticket || !flusher_running; });
+        if (!flusher_running && next_ticket == durable_ticket) break;
+
+        // A write just became pending. Wait up to window_ms more to let
+        // concurrent writers add to this batch (or until max_batch is hit,
+        // signaled early via notify from append_entry_buffered), then flush
+        // everything accumulated in one fsync.
+        flush_cv.wait_for(lock, std::chrono::milliseconds(flusher_window_ms), [&] {
+            return static_cast<int>(next_ticket - durable_ticket) >= flusher_max_batch || !flusher_running;
+        });
+
+        if (wal_file && next_ticket > durable_ticket) {
+            std::fflush(wal_file);
+            fsync(fileno(wal_file));
+            durable_ticket = next_ticket;
+            flush_cv.notify_all();
+        }
+    }
+    // Final drain on shutdown so a buffered-but-unflushed write is never lost.
+    if (wal_file && next_ticket > durable_ticket) {
+        std::fflush(wal_file);
+        fsync(fileno(wal_file));
+        durable_ticket = next_ticket;
+        flush_cv.notify_all();
+    }
+}
+
+bool WalManager::start_group_commit_flusher(int window_ms, int max_batch) {
+    flusher_window_ms = window_ms;
+    flusher_max_batch = max_batch;
+    flusher_running = true;
+    flusher_thread = std::thread(&WalManager::flusher_loop, this);
+    return true;
+}
+
+void WalManager::stop_group_commit_flusher() {
+    {
+        std::lock_guard<std::mutex> lock(wal_mutex);
+        flusher_running = false;
+    }
+    flush_cv.notify_all();
+    if (flusher_thread.joinable()) {
+        flusher_thread.join();
+    }
 }
 
 int WalManager::replayInto(LockManager& lm) {
@@ -226,11 +318,11 @@ bool WalManager::load_snapshot(LockManager& lm) {
     return true;
 }
 
-bool WalManager::write_snapshot(LockManager& lm) {
+bool WalManager::write_snapshot_only(LockManager& lm) {
     std::string tmp_path = snapshot_path + ".tmp";
     FILE* f = std::fopen(tmp_path.c_str(), "wb");
     if (!f) return false;
-    
+
     auto pairs = lm.get_all_pairs();
     for (const auto& [k, v] : pairs) {
         std::fputc('S', f);
@@ -243,19 +335,43 @@ bool WalManager::write_snapshot(LockManager& lm) {
         if (!v.empty()) {
             std::fwrite(v.data(), 1, v.size(), f);
         }
+
+        // Chaos-testing hook only: lets chaos_suite.py reliably land a
+        // SIGKILL mid-write to test the temp-then-rename atomicity below.
+        // No-op unless explicitly set; never used in normal operation.
+        if (const char* delay_ms = std::getenv("AETHER_CHAOS_SNAPSHOT_DELAY_MS")) {
+            int ms = std::atoi(delay_ms);
+            if (ms > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+            }
+        }
     }
-    
+
     std::fflush(f);
     fsync(fileno(f));
     std::fclose(f);
-    
-    // Atomic rename over the real snapshot path
+
+    // Atomic rename over the real snapshot path. If a chaos test kills this
+    // process before this line runs, tmp_path is simply abandoned - the real
+    // snapshot_path (old snapshot, or none) is untouched, exactly the
+    // property this method exists to prove.
     if (std::rename(tmp_path.c_str(), snapshot_path.c_str()) != 0) {
         std::remove(tmp_path.c_str());
         return false;
     }
-    
-    // Now truncate the WAL file
+    return true;
+}
+
+bool WalManager::write_snapshot(LockManager& lm) {
+    if (!write_snapshot_only(lm)) {
+        return false;
+    }
+
+    // Now truncate the WAL file. NOT safe in cluster mode - RaftNode::log_
+    // mirrors the WAL's term/index exactly, and truncating it out from under
+    // Raft without an InstallSnapshot RPC would desync this node from the
+    // cluster. Only called from the standalone-mode compaction timer
+    // (main.cpp gates this) and never from SNAPSHOT_EXPORT.
     {
         std::lock_guard<std::mutex> lock(wal_mutex);
         if (wal_file) {
@@ -272,7 +388,7 @@ bool WalManager::write_snapshot(LockManager& lm) {
         // Reopen for append
         wal_file = std::fopen(wal_path.c_str(), "a+b");
     }
-    
+
     std::cout << "Snapshot compaction complete. WAL truncated." << std::endl;
     return true;
 }

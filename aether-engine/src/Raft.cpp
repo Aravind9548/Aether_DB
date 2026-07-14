@@ -1,5 +1,6 @@
 #include "Raft.hpp"
 #include <cstdio>
+#include <cstdlib>
 #include <sstream>
 #include <iostream>
 #include <memory>
@@ -80,6 +81,7 @@ bool RaftNode::start() {
         std::cerr << "[Raft] Cannot open v2 WAL; refusing to start." << std::endl;
         return false;
     }
+    engine.get_wal_manager().start_group_commit_flusher(5, 64);
 
     // Persistent per-peer channel + stub, created once and reused for the
     // node's lifetime (unlike the old per-RPC tcp_connect). CreateChannel is
@@ -129,6 +131,10 @@ void RaftNode::stop() {
     while (inflight_rpcs.load() > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+    // Safe only here: by this point the gRPC server has fully drained (no
+    // propose() call can still be blocked in wait_for_durable), so the
+    // flusher's final drain is the last WAL activity before shutdown.
+    engine.get_wal_manager().stop_group_commit_flusher();
 }
 
 RaftNode::Status RaftNode::get_status() {
@@ -262,24 +268,38 @@ std::string RaftNode::get_leader_address() {
 
 RaftNode::ProposeResult RaftNode::propose(char op, const std::string& key, const std::string& val, int timeout_ms) {
     uint64_t entry_index = 0;
+    uint64_t entry_term = 0;
+    uint64_t flush_ticket = 0;
     {
         std::unique_lock<std::mutex> lock(mtx);
         if (role != RaftRole::Leader) {
             return {ProposeStatus::NOT_LEADER, leader_id};
         }
 
-        uint64_t entry_term = current_term;
+        entry_term = current_term;
         entry_index = last_log_index_locked() + 1;
 
         try {
-            engine.get_wal_manager().append_entry(entry_term, entry_index, op, key, val);
+            // Buffered, not fsynced yet - mtx is released below so concurrent
+            // propose() calls can append too, letting the group-commit
+            // flusher batch multiple writers' entries into one fsync
+            // (Tier 1 write-throughput optimization).
+            flush_ticket = engine.get_wal_manager().append_entry_buffered(entry_term, entry_index, op, key, val);
         } catch (const std::exception& e) {
             std::cerr << "[Raft] Failed to write WAL for proposal: " << e.what() << std::endl;
             return {ProposeStatus::TIMEOUT, leader_id};
         }
 
         log_.push_back(WalRecord{entry_term, entry_index, op, key, val});
-        broadcast_append_entries_locked();
+    } // mtx released - other propose()/RPC-handling calls can now proceed
+
+    // Don't tell followers about this entry until it's durably on disk here
+    // first - same guarantee the old synchronous append_entry() gave.
+    engine.get_wal_manager().wait_for_durable(flush_ticket);
+
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        broadcast_append_entries_locked(); // no-ops internally if we're no longer leader
     }
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -450,8 +470,23 @@ void RaftNode::send_append_entries_to_locked(size_t peer_idx) {
 
     peer_busy[peer_idx] = 1;
     inflight_rpcs++;
+    int peer_id = peers[peer_idx].id;
 
-    std::thread([this, peer_idx, term, prev_index, prev_term, commit, entries = std::move(entries)]() {
+    std::thread([this, peer_idx, peer_id, term, prev_index, prev_term, commit, entries = std::move(entries)]() {
+        // Chaos-testing hook only: simulates a slow/degraded peer link by
+        // delaying the leader's send to one specific configured peer ID.
+        // No-op unless both env vars are set; never used in normal operation.
+        if (const char* delay_peer = std::getenv("AETHER_CHAOS_DELAY_PEER_ID")) {
+            if (std::atoi(delay_peer) == peer_id) {
+                if (const char* delay_ms = std::getenv("AETHER_CHAOS_DELAY_MS")) {
+                    int ms = std::atoi(delay_ms);
+                    if (ms > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+                    }
+                }
+            }
+        }
+
         aether::raft::AppendEntriesRequest req;
         req.set_term(term);
         req.set_leader_id(node_id);
@@ -559,6 +594,7 @@ RaftNode::AppendEntriesResult RaftNode::handle_append_entries(uint64_t term, int
     }
 
     uint64_t next_idx = prev_log_index + 1;
+    bool appended_new = false;
     for (size_t i = 0; i < entries.size(); ++i) {
         uint64_t curr_idx = next_idx + i;
         if (curr_idx <= log_.size()) {
@@ -576,11 +612,21 @@ RaftNode::AppendEntriesResult RaftNode::handle_append_entries(uint64_t term, int
             }
         }
         if (curr_idx > log_.size()) {
-            engine.get_wal_manager().append_entry(
+            // Buffered, not fsynced per-entry - flush_now() below batches
+            // every new entry from this one AppendEntries RPC into a single
+            // fsync (Tier 1 write-throughput optimization). Still fully
+            // inside this function's mtx lock, unlike the leader's propose()
+            // path - a follower only ever processes one RPC at a time here,
+            // so there's no cross-call concurrency to unlock.
+            engine.get_wal_manager().append_entry_buffered(
                 entries[i].term, entries[i].index, entries[i].op, entries[i].key, entries[i].val
             );
             log_.push_back(entries[i]);
+            appended_new = true;
         }
+    }
+    if (appended_new) {
+        engine.get_wal_manager().flush_now();
     }
 
     if (leader_commit > commit_index) {
