@@ -39,25 +39,45 @@ if(NOT GRPC_CPP_PLUGIN_EXECUTABLE)
     message(FATAL_ERROR "grpc_cpp_plugin not found - install protobuf-compiler-grpc")
 endif()
 
-set(PROTO_FILE ${CMAKE_SOURCE_DIR}/proto/raft.proto)
 set(PROTO_GEN_DIR ${CMAKE_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${PROTO_GEN_DIR})
 
-set(PROTO_SRCS ${PROTO_GEN_DIR}/raft.pb.cc)
-set(PROTO_HDRS ${PROTO_GEN_DIR}/raft.pb.h)
-set(GRPC_SRCS ${PROTO_GEN_DIR}/raft.grpc.pb.cc)
-set(GRPC_HDRS ${PROTO_GEN_DIR}/raft.grpc.pb.h)
+# Raft peer RPCs (Phase A)
+set(RAFT_PROTO_FILE ${CMAKE_SOURCE_DIR}/proto/raft.proto)
+set(RAFT_PROTO_SRCS ${PROTO_GEN_DIR}/raft.pb.cc)
+set(RAFT_PROTO_HDRS ${PROTO_GEN_DIR}/raft.pb.h)
+set(RAFT_GRPC_SRCS ${PROTO_GEN_DIR}/raft.grpc.pb.cc)
+set(RAFT_GRPC_HDRS ${PROTO_GEN_DIR}/raft.grpc.pb.h)
 
 add_custom_command(
-    OUTPUT ${PROTO_SRCS} ${PROTO_HDRS} ${GRPC_SRCS} ${GRPC_HDRS}
+    OUTPUT ${RAFT_PROTO_SRCS} ${RAFT_PROTO_HDRS} ${RAFT_GRPC_SRCS} ${RAFT_GRPC_HDRS}
     COMMAND ${PROTOC_EXECUTABLE}
     ARGS --cpp_out=${PROTO_GEN_DIR}
          --grpc_out=${PROTO_GEN_DIR}
          --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN_EXECUTABLE}
          -I ${CMAKE_SOURCE_DIR}/proto
-         ${PROTO_FILE}
-    DEPENDS ${PROTO_FILE}
+         ${RAFT_PROTO_FILE}
+    DEPENDS ${RAFT_PROTO_FILE}
     COMMENT "Generating gRPC/protobuf code from raft.proto"
+)
+
+# Client data-path RPCs (Phase B)
+set(CLIENT_PROTO_FILE ${CMAKE_SOURCE_DIR}/proto/client.proto)
+set(CLIENT_PROTO_SRCS ${PROTO_GEN_DIR}/client.pb.cc)
+set(CLIENT_PROTO_HDRS ${PROTO_GEN_DIR}/client.pb.h)
+set(CLIENT_GRPC_SRCS ${PROTO_GEN_DIR}/client.grpc.pb.cc)
+set(CLIENT_GRPC_HDRS ${PROTO_GEN_DIR}/client.grpc.pb.h)
+
+add_custom_command(
+    OUTPUT ${CLIENT_PROTO_SRCS} ${CLIENT_PROTO_HDRS} ${CLIENT_GRPC_SRCS} ${CLIENT_GRPC_HDRS}
+    COMMAND ${PROTOC_EXECUTABLE}
+    ARGS --cpp_out=${PROTO_GEN_DIR}
+         --grpc_out=${PROTO_GEN_DIR}
+         --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN_EXECUTABLE}
+         -I ${CMAKE_SOURCE_DIR}/proto
+         ${CLIENT_PROTO_FILE}
+    DEPENDS ${CLIENT_PROTO_FILE}
+    COMMENT "Generating gRPC/protobuf code from client.proto"
 )
 
 # Server executable sources
@@ -67,8 +87,10 @@ set(SOURCES
     src/Server.cpp
     src/Raft.cpp
     src/main.cpp
-    ${PROTO_SRCS}
-    ${GRPC_SRCS}
+    ${RAFT_PROTO_SRCS}
+    ${RAFT_GRPC_SRCS}
+    ${CLIENT_PROTO_SRCS}
+    ${CLIENT_GRPC_SRCS}
 )
 
 # Headers for IDE visibility
@@ -78,8 +100,10 @@ set(HEADERS
     include/Engine.hpp
     include/Server.hpp
     include/Raft.hpp
-    ${PROTO_HDRS}
-    ${GRPC_HDRS}
+    ${RAFT_PROTO_HDRS}
+    ${RAFT_GRPC_HDRS}
+    ${CLIENT_PROTO_HDRS}
+    ${CLIENT_GRPC_HDRS}
 )
 
 add_executable(AetherDB ${SOURCES} ${HEADERS})
@@ -93,6 +117,11 @@ target_link_libraries(AetherDB PRIVATE Threads::Threads)
 # Unit tests
 add_executable(wal_v2_test tests/wal_v2_test.cpp src/Persistence.cpp)
 target_link_libraries(wal_v2_test PRIVATE Threads::Threads)
+
+# Client gRPC smoke test (Phase B) - pure client, no engine/Raft deps needed
+add_executable(client_grpc_test tests/client_grpc_test.cpp ${CLIENT_PROTO_SRCS} ${CLIENT_GRPC_SRCS})
+target_include_directories(client_grpc_test PRIVATE ${PROTO_GEN_DIR})
+target_link_libraries(client_grpc_test PRIVATE ${AETHER_PROTOBUF_LIB} ${AETHER_GRPCXX_LIB} Threads::Threads)
 
 # TSAN Sanitizer configuration
 if(ENABLE_TSAN)

@@ -1,7 +1,9 @@
 version: '3.8'
 
-# AetherDB 3-node Raft cluster. Client protocol on 8080, Raft RPC on 9080
-# (client port + 1000), both internal to the mesh network only.
+# AetherDB 3-node Raft cluster. Text protocol (SET/GET/DEL/STATUS) on 8080,
+# client gRPC (SET/GET/DEL, used by the gateway) on 10080 (client port + 2000),
+# Raft peer gRPC on 9080 (client port + 1000) - all internal to the mesh
+# network only.
 x-engine-common: &engine-common
   build:
     context: ./aether-engine
@@ -61,8 +63,8 @@ services:
       - "8080:8080"  # Publicly exposed API Gateway
     environment:
       - AETHER_ENGINE_HOST=aether-engine-1
-      - AETHER_ENGINE_PORT=8080
-      - AETHER_ENGINE_NODES=aether-engine-1:8080,aether-engine-2:8080,aether-engine-3:8080
+      - AETHER_ENGINE_PORT=10080
+      - AETHER_ENGINE_NODES=aether-engine-1:10080,aether-engine-2:10080,aether-engine-3:10080
       - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/aether_auth
       - SPRING_DATASOURCE_USERNAME=aether_admin
       - SPRING_DATASOURCE_PASSWORD=secure_password_123

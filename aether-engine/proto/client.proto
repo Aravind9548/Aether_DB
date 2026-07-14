@@ -1,0 +1,50 @@
+// Canonical source. aether-gateway/src/main/proto/client.proto is a manually
+// synced copy (see Phase B plan's scoping decision #2) — update both.
+syntax = "proto3";
+package aether.client;
+
+// Java codegen only (ignored by the C++ side) - explicit rather than relying
+// on protoc's default outer-class-name derivation from the filename.
+option java_package = "aether.client";
+option java_multiple_files = true;
+
+// Client data-path RPCs (SET/GET/DEL) between the gateway and the engine.
+// STATUS and the raw-TCP diagnostic protocol are intentionally NOT part of
+// this service — see the Phase B plan's scoping decision #1.
+
+message SetRequest {
+  string key = 1;
+  string val = 2;
+}
+message SetResponse {
+  bool ok = 1;
+  bool not_leader = 2;
+  string leader_hint = 3;
+  string error = 4;
+}
+
+message GetRequest {
+  string key = 1;
+}
+message GetResponse {
+  bool found = 1;
+  string val = 2;
+  bool not_leader = 3;
+  string leader_hint = 4;
+}
+
+message DeleteRequest {
+  string key = 1;
+}
+message DeleteResponse {
+  bool deleted = 1;
+  bool not_leader = 2;
+  string leader_hint = 3;
+  string error = 4;
+}
+
+service AetherClient {
+  rpc Set(SetRequest) returns (SetResponse);
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+}

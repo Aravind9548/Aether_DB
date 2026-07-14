@@ -9,6 +9,69 @@
 #include <sstream>
 #include <algorithm>
 
+// Client gRPC (SET/GET/DEL) listens at client port + this offset. STATUS and
+// the raw-TCP text protocol stay on the original port (Phase B scoping
+// decision #1 — see the plan) — only the data path moved to gRPC.
+static constexpr int CLIENT_GRPC_PORT_OFFSET = 2000;
+
+// do_set/do_get/do_delete's leader_hint (from RaftNode::get_leader_address())
+// is "host:<text-protocol port>" — correct for the raw-TCP protocol's own
+// redirect-follow logic, but the gRPC client needs the *gRPC* port instead.
+// Rewritten here, not in Raft.cpp, since this is purely a gRPC-transport
+// concern (the text protocol keeps using the untranslated hint as-is).
+static std::string to_grpc_leader_hint(const std::string& text_protocol_addr) {
+    size_t colon = text_protocol_addr.rfind(':');
+    if (colon == std::string::npos) return text_protocol_addr; // e.g. "unknown"
+    try {
+        int text_port = std::stoi(text_protocol_addr.substr(colon + 1));
+        return text_protocol_addr.substr(0, colon) + ":" +
+               std::to_string(text_port + CLIENT_GRPC_PORT_OFFSET);
+    } catch (...) {
+        return text_protocol_addr;
+    }
+}
+
+// gRPC AetherClient service glue: converts protobuf requests/responses
+// to/from Server's transport-independent do_set/do_get/do_delete. No client
+// logic lives here — same idiom as RaftNode::RaftServiceImpl from Phase A.
+class Server::ClientServiceImpl final : public aether::client::AetherClient::Service {
+public:
+    explicit ClientServiceImpl(Server* server) : server_(server) {}
+
+    grpc::Status Set(grpc::ServerContext*, const aether::client::SetRequest* request,
+                     aether::client::SetResponse* response) override {
+        auto r = server_->do_set(request->key(), request->val());
+        response->set_ok(r.ok);
+        response->set_not_leader(r.not_leader);
+        response->set_leader_hint(to_grpc_leader_hint(r.leader_hint));
+        response->set_error(r.error);
+        return grpc::Status::OK;
+    }
+
+    grpc::Status Get(grpc::ServerContext*, const aether::client::GetRequest* request,
+                     aether::client::GetResponse* response) override {
+        auto r = server_->do_get(request->key());
+        response->set_found(r.value.has_value());
+        response->set_val(r.value.value_or(""));
+        response->set_not_leader(r.not_leader);
+        response->set_leader_hint(to_grpc_leader_hint(r.leader_hint));
+        return grpc::Status::OK;
+    }
+
+    grpc::Status Delete(grpc::ServerContext*, const aether::client::DeleteRequest* request,
+                        aether::client::DeleteResponse* response) override {
+        auto r = server_->do_delete(request->key());
+        response->set_deleted(r.ok);
+        response->set_not_leader(r.not_leader);
+        response->set_leader_hint(to_grpc_leader_hint(r.leader_hint));
+        response->set_error(r.error);
+        return grpc::Status::OK;
+    }
+
+private:
+    Server* server_;
+};
+
 Server::Server(Engine& engine, int port, RaftNode* raft, int propose_timeout_ms)
     : engine(engine), port(port), raft(raft), propose_timeout_ms(propose_timeout_ms) {}
 
@@ -16,7 +79,37 @@ Server::~Server() {
     stop();
 }
 
+void Server::start_grpc_server() {
+    grpc_service_ = std::make_unique<ClientServiceImpl>(this);
+    std::string addr = "0.0.0.0:" + std::to_string(port + CLIENT_GRPC_PORT_OFFSET);
+    grpc::ServerBuilder builder;
+    builder.AddListeningPort(addr, grpc::InsecureServerCredentials());
+    builder.RegisterService(grpc_service_.get());
+    grpc_server_ = builder.BuildAndStart();
+    if (!grpc_server_) {
+        std::cerr << "Failed to start client gRPC server on " << addr << std::endl;
+        return;
+    }
+    grpc_server_thread_ = std::thread([this]() { grpc_server_->Wait(); });
+    std::cout << "Client gRPC service listening on " << addr << "..." << std::endl;
+}
+
+void Server::stop_grpc_server() {
+    if (grpc_server_) {
+        grpc_server_->Shutdown();
+    }
+    if (grpc_server_thread_.joinable()) {
+        grpc_server_thread_.join();
+    }
+}
+
 void Server::start() {
+    start_grpc_server();
+    // Set before the TCP setup below so that stop()'s `if (!running) return`
+    // guard still runs stop_grpc_server() if socket()/bind()/listen() fails
+    // partway through (otherwise the gRPC server/thread would leak).
+    running = true;
+
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         perror("socket creation failed");
@@ -51,7 +144,6 @@ void Server::start() {
         return;
     }
 
-    running = true;
     std::cout << "Server listening on port " << port << "..." << std::endl;
 
     while (running) {
@@ -81,6 +173,8 @@ void Server::start() {
 void Server::stop() {
     if (!running) return;
     running = false;
+
+    stop_grpc_server();
 
     // Shutdown the listener socket to unblock accept()
     if (server_fd != -1) {
@@ -139,6 +233,73 @@ void Server::handle_client(int client_sock) {
     active_clients--;
 }
 
+// Transport-independent client ops. Logic is unchanged from the original
+// inline text-protocol handling below — just extracted so the gRPC
+// AetherClient service (ClientServiceImpl, top of this file) can call the
+// same code instead of duplicating it.
+
+Server::ClientOpResult Server::do_set(const std::string& key, const std::string& val) {
+    ClientOpResult r;
+    try {
+        if (raft) {
+            auto res = raft->propose('S', key, val, propose_timeout_ms);
+            if (res.status == RaftNode::ProposeStatus::NOT_LEADER) {
+                r.not_leader = true;
+                r.leader_hint = raft->get_leader_address();
+            } else if (res.status == RaftNode::ProposeStatus::TIMEOUT) {
+                r.error = "TIMEOUT";
+            } else {
+                r.ok = true;
+            }
+        } else {
+            engine.set(key, val);
+            r.ok = true;
+        }
+    } catch (const std::exception& e) {
+        r.error = e.what();
+    }
+    return r;
+}
+
+Server::ClientOpResult Server::do_get(const std::string& key) {
+    ClientOpResult r;
+    if (raft) {
+        auto status = raft->get_status();
+        if (status.role != RaftRole::Leader) {
+            r.not_leader = true;
+            r.leader_hint = raft->get_leader_address();
+            return r;
+        }
+    }
+    r.value = engine.get(key); // nullopt == not found
+    return r;
+}
+
+Server::ClientOpResult Server::do_delete(const std::string& key) {
+    ClientOpResult r;
+    try {
+        if (raft) {
+            auto res = raft->propose('D', key, "", propose_timeout_ms);
+            if (res.status == RaftNode::ProposeStatus::NOT_LEADER) {
+                r.not_leader = true;
+                r.leader_hint = raft->get_leader_address();
+            } else if (res.status == RaftNode::ProposeStatus::TIMEOUT) {
+                r.error = "TIMEOUT";
+            } else {
+                // Raft path can't distinguish "erased" from "key never
+                // existed" (propose() only reports commit success) — matches
+                // pre-existing text-protocol behavior of always returning "1".
+                r.ok = true;
+            }
+        } else {
+            r.ok = engine.remove(key);
+        }
+    } catch (const std::exception& e) {
+        r.error = e.what();
+    }
+    return r;
+}
+
 std::string Server::process_line(const std::string& line) {
     std::string clean_line = line;
     if (!clean_line.empty() && clean_line.back() == '\r') {
@@ -159,36 +320,16 @@ std::string Server::process_line(const std::string& line) {
         std::string val;
         std::ws(iss);
         std::getline(iss, val);
-        try {
-            if (raft) {
-                auto res = raft->propose('S', key, val, propose_timeout_ms);
-                if (res.status == RaftNode::ProposeStatus::NOT_LEADER) {
-                    return "ERR NOT_LEADER " + raft->get_leader_address() + "\n";
-                } else if (res.status == RaftNode::ProposeStatus::TIMEOUT) {
-                    return "ERR TIMEOUT\n";
-                }
-                return "OK\n";
-            } else {
-                engine.set(key, val);
-                return "OK\n";
-            }
-        } catch (const std::exception& e) {
-            return std::string("ERR ") + e.what() + "\n";
-        }
+        auto r = do_set(key, val);
+        if (r.not_leader) return "ERR NOT_LEADER " + r.leader_hint + "\n";
+        if (r.error == "TIMEOUT") return "ERR TIMEOUT\n";
+        if (!r.error.empty()) return "ERR " + r.error + "\n";
+        return "OK\n";
     } else if (cmd == "GET") {
         if (!(iss >> key)) return "ERR syntax error\n";
-        if (raft) {
-            auto status = raft->get_status();
-            if (status.role != RaftRole::Leader) {
-                return "ERR NOT_LEADER " + raft->get_leader_address() + "\n";
-            }
-        }
-        auto val_opt = engine.get(key);
-        if (val_opt.has_value()) {
-            return val_opt.value() + "\n";
-        } else {
-            return "(nil)\n";
-        }
+        auto r = do_get(key);
+        if (r.not_leader) return "ERR NOT_LEADER " + r.leader_hint + "\n";
+        return r.value.has_value() ? r.value.value() + "\n" : "(nil)\n";
     } else if (cmd == "STATUS") {
         // Introspection: role/term/commit for demos and health checks.
         if (raft) {
@@ -204,22 +345,11 @@ std::string Server::process_line(const std::string& line) {
         return "role=STANDALONE\n";
     } else if (cmd == "DEL") {
         if (!(iss >> key)) return "ERR syntax error\n";
-        try {
-            if (raft) {
-                auto res = raft->propose('D', key, "", propose_timeout_ms);
-                if (res.status == RaftNode::ProposeStatus::NOT_LEADER) {
-                    return "ERR NOT_LEADER " + raft->get_leader_address() + "\n";
-                } else if (res.status == RaftNode::ProposeStatus::TIMEOUT) {
-                    return "ERR TIMEOUT\n";
-                }
-                return "1\n";
-            } else {
-                bool erased = engine.remove(key);
-                return erased ? "1\n" : "0\n";
-            }
-        } catch (const std::exception& e) {
-            return std::string("ERR ") + e.what() + "\n";
-        }
+        auto r = do_delete(key);
+        if (r.not_leader) return "ERR NOT_LEADER " + r.leader_hint + "\n";
+        if (r.error == "TIMEOUT") return "ERR TIMEOUT\n";
+        if (!r.error.empty()) return "ERR " + r.error + "\n";
+        return r.ok ? "1\n" : "0\n";
     } else {
         return "ERR unknown command\n";
     }

@@ -9,7 +9,7 @@ import java.util.Optional;
 public class StorageService {
 
     @Autowired
-    private AetherTcpClient tcpClient;
+    private AetherEngineClient engineClient;
 
     /**
      * Constructs a length-prefixed isolated key namespace.
@@ -23,26 +23,18 @@ public class StorageService {
 
     public void put(String tenantId, String key, String value) throws IOException {
         String internalKey = buildIsolatedKey(tenantId, key);
-        String response = tcpClient.sendCommand("SET " + internalKey + " " + value);
-        if (!"OK".equals(response)) {
-            throw new IOException("Engine operation failed: " + response);
+        if (!engineClient.set(internalKey, value)) {
+            throw new IOException("Engine operation failed for SET " + internalKey);
         }
     }
 
     public Optional<String> get(String tenantId, String key) throws IOException {
         String internalKey = buildIsolatedKey(tenantId, key);
-        String response = tcpClient.sendCommand("GET " + internalKey);
-        
-        // Map the engine's internal representation of a missing key to an empty Java Optional
-        if ("(nil)".equals(response) || response == null) {
-            return Optional.empty();
-        }
-        return Optional.of(response);
+        return engineClient.get(internalKey);
     }
 
     public boolean delete(String tenantId, String key) throws IOException {
         String internalKey = buildIsolatedKey(tenantId, key);
-        String response = tcpClient.sendCommand("DEL " + internalKey);
-        return "1".equals(response);
+        return engineClient.delete(internalKey);
     }
 }
