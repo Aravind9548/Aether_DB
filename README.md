@@ -114,6 +114,12 @@ python3 scripts/raft_safety_test.py
 ```
 `aether-engine/scripts/raft_chaos_test.py` runs the same scenario as an automated local test (3 processes, no Docker needed).
 
+A fourth script, `aether-engine/scripts/gateway_concurrent_load_test.py`, targets a different concern: genuine concurrent client load through the **gateway's gRPC client path** specifically (`AetherEngineClient`, added in Phase B), as opposed to Raft-layer concurrency. N threads issue SET+GET pairs simultaneously over their own persistent HTTP connections against the live gateway; it verifies zero errors/lost/corrupted writes and reports real throughput. Run against a live `docker compose up` stack:
+```bash
+python3 aether-engine/scripts/gateway_concurrent_load_test.py --threads 20 --ops-per-thread 25
+```
+Sample real result: 1000/1000 ops succeeded, 0 errors, ~90 ops/sec (SETs are consensus-bound — each requires a WAL fsync plus majority replication before the gateway gets `OK` — so this throughput number reflects Raft commit latency, not a client-path bottleneck).
+
 ### Honest Limitations / Future Work
 - **No InstallSnapshot RPC**: snapshot compaction is disabled in cluster mode, so the Raft log grows unbounded; a rejoining node catches up by log replay, not snapshot transfer.
 - **No dynamic membership changes**: the 3-node topology is fixed at deploy time.
