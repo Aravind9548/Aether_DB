@@ -1,16 +1,39 @@
 version: '3.8'
 
+# AetherDB 3-node Raft cluster. Client protocol on 8080, Raft RPC on 9080
+# (client port + 1000), both internal to the mesh network only.
+x-engine-common: &engine-common
+  build:
+    context: ./aether-engine
+    dockerfile: Dockerfile
+  networks:
+    - aether-mesh
+  restart: always
+
 services:
-  aether-engine:
-    build:
-      context: ./aether-engine
-      dockerfile: Dockerfile
+  aether-engine-1:
+    <<: *engine-common
+    environment:
+      - AETHER_NODE_ID=1
+      - AETHER_PEERS=2=aether-engine-2:8080,3=aether-engine-3:8080
     volumes:
-      - aether_data:/data
-    # Isolated from the public internet, accessible only within the network mesh
-    networks:
-      - aether-mesh
-    restart: always
+      - aether_data_1:/data
+
+  aether-engine-2:
+    <<: *engine-common
+    environment:
+      - AETHER_NODE_ID=2
+      - AETHER_PEERS=1=aether-engine-1:8080,3=aether-engine-3:8080
+    volumes:
+      - aether_data_2:/data
+
+  aether-engine-3:
+    <<: *engine-common
+    environment:
+      - AETHER_NODE_ID=3
+      - AETHER_PEERS=1=aether-engine-1:8080,2=aether-engine-2:8080
+    volumes:
+      - aether_data_3:/data
 
   postgres:
     image: postgres:15-alpine
@@ -24,6 +47,12 @@ services:
       - aether-mesh
     restart: always
 
+  redis:
+    image: redis:7-alpine
+    networks:
+      - aether-mesh
+    restart: always
+
   api-gateway:
     build:
       context: ./aether-gateway
@@ -31,14 +60,20 @@ services:
     ports:
       - "8080:8080"  # Publicly exposed API Gateway
     environment:
-      - AETHER_ENGINE_HOST=aether-engine
+      - AETHER_ENGINE_HOST=aether-engine-1
       - AETHER_ENGINE_PORT=8080
+      - AETHER_ENGINE_NODES=aether-engine-1:8080,aether-engine-2:8080,aether-engine-3:8080
       - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/aether_auth
       - SPRING_DATASOURCE_USERNAME=aether_admin
       - SPRING_DATASOURCE_PASSWORD=secure_password_123
+      - SPRING_DATA_REDIS_HOST=redis
+      - SPRING_DATA_REDIS_PORT=6379
     depends_on:
-      - aether-engine
+      - aether-engine-1
+      - aether-engine-2
+      - aether-engine-3
       - postgres
+      - redis
     networks:
       - aether-mesh
     restart: always
@@ -48,5 +83,7 @@ networks:
     driver: bridge
 
 volumes:
-  aether_data:
+  aether_data_1:
+  aether_data_2:
+  aether_data_3:
   pg_data:

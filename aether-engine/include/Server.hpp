@@ -5,9 +5,12 @@
 #include <unordered_set>
 #include "Engine.hpp"
 
+class RaftNode;
+
 class Server {
 public:
-    Server(Engine& engine, int port);
+    Server(Engine& engine, int port, RaftNode* raft = nullptr,
+           int propose_timeout_ms = 5000);
     ~Server();
 
     // Prevent copy/move
@@ -23,6 +26,8 @@ private:
 
     Engine& engine;
     int port;
+    RaftNode* raft;
+    int propose_timeout_ms;
     int server_fd = -1;
     std::atomic<bool> running{false};
     std::atomic<int> active_clients{0};

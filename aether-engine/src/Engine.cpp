@@ -27,7 +27,7 @@ void Engine::set(const std::string& key, const std::string& val) {
     // If we crash between log and memory write, the log replay restores it.
     // If we crash before logging, the client never receives "OK".
     wal_manager.append('S', key, val);
-    lock_manager.set(key, val);
+    apply('S', key, val);
 }
 
 std::optional<std::string> Engine::get(const std::string& key) {
@@ -40,10 +40,22 @@ bool Engine::remove(const std::string& key) {
     return lock_manager.remove(key);
 }
 
+void Engine::apply(char op, const std::string& key, const std::string& val) {
+    if (op == 'S') {
+        lock_manager.set(key, val);
+    } else if (op == 'D') {
+        lock_manager.remove(key);
+    }
+}
+
 bool Engine::compact() {
     return wal_manager.write_snapshot(lock_manager);
 }
 
 LockManager& Engine::get_lock_manager() {
     return lock_manager;
+}
+
+WalManager& Engine::get_wal_manager() {
+    return wal_manager;
 }

@@ -1,6 +1,6 @@
 # AetherDB-Platform
 
-AetherDB-Platform is a production-grade, highly concurrent, secure, and persistent key-value platform. It orchestrates a C++17 sharded database engine, a PostgreSQL user registry, and a Java Spring Boot 3 API Gateway implementing JWT authentication, multi-tenant isolation, and non-blocking connection pooling.
+AetherDB-Platform is a production-grade, highly concurrent, secure, and persistent key-value platform. It orchestrates a **3-node Raft-replicated** C++17 sharded database engine, a PostgreSQL user registry, and a Java Spring Boot 3 API Gateway implementing JWT authentication, multi-tenant isolation, non-blocking connection pooling, and automatic leader-failover routing.
 
 ---
 
@@ -13,10 +13,14 @@ AetherDB-Platform is a production-grade, highly concurrent, secure, and persiste
                                               ├── (2. Multi-tenant key prefix isolation)
                                               ▼
                                     [Java Socket Client Pool]
+                                     (leader-aware routing)
                                               │
                                        (Raw TCP Bytes)
                                               ▼
-                                    [AetherDB C++ Engine]
+                          ┌────────────[Raft Cluster]────────────┐
+                          │  [engine-1]   [engine-2]  [engine-3] │
+                          │      └── AppendEntries / votes ──┘   │
+                          └──────────────────────────────────────┘
 ```
 
 - **aether-gateway**: Acts as the single entry point. It handles user authentication, generates JWTs, and acts as a secure reverse proxy that sanitizes user queries and routes them to the C++ core engine.
@@ -50,6 +54,71 @@ AetherDB-Platform is a production-grade, highly concurrent, secure, and persiste
 ### 6. Zero-Trust Network Topologies
 * **What breaks:** Securing your infrastructure only at the API web gateway leaves internal database ports vulnerable if the core network engine is exposed directly on the host interface. Anyone with raw terminal access (`nc` or `telnet`) can connect to port 8080 and wipe the engine data entirely.
 * **The Architecture:** The C++ binary operates inside an isolated Docker bridge network (`aether-mesh`). Sockets bind to internal interfaces, meaning the database cannot be queried directly from the internet, protecting data integrity.
+
+### 7. Raft Consensus Replication (C++ Engine Cluster)
+* **What breaks:** A single engine process is a single point of failure — kill it and the platform is down until it restarts, and any un-snapshotted data relies on one disk surviving.
+* **The Architecture:** Three engine nodes run the Raft consensus protocol (leader election + majority-commit log replication), implemented from scratch in C++17. The **existing WAL doubles as the Raft log**: records carry a `term` and `index`, the leader streams them to followers via AppendEntries, and each follower persists them through the same fsync'd WAL machinery used for crash recovery — one mechanism, two jobs (durability *and* replication). A write is acknowledged only after a majority of nodes have it on disk, so killing the leader mid-load loses **zero acknowledged writes** (verified by test, including under concurrent multi-writer load — see below).
+* **Peer RPC transport: gRPC.** `RequestVote`/`AppendEntries` between engine nodes run over gRPC (`aether-engine/proto/raft.proto`), not a hand-rolled socket protocol — a deliberate transport swap once the hand-rolled version was proven correct, to demonstrate knowing when *not* to hand-roll infrastructure. This was a pure transport migration: zero changes to election rules, the commit rule, log-conflict truncation, or the WAL, verified by rerunning the exact same `raft_demo.py`/`raft_safety_test.py` suites unchanged before/after and confirming identical PASS criteria. The client-gateway-engine protocol (`SET`/`GET`/`DEL`/`STATUS`) is intentionally untouched for now — a smaller, proven-first migration rather than a big-bang rewrite; migrating it too is documented future work below.
+* **Measured failover time**: **~1.0–2.4 seconds** across independent runs against the live Docker cluster (best observed: 999ms; typical: ~2.35s), measured precisely from the `docker kill` timestamp to a new leader confirmed via `STATUS`, printed by `raft_demo.py` on every run. Consistent with the 800–1600 ms randomized election timer plus RPC overhead; the high end of the range tracks host CPU contention (this was measured on a dev machine also running Docker Desktop's own Kubernetes control plane, which independently used 40–70% CPU during some runs) rather than anything in the Raft implementation itself.
+
+* Key mechanics, per the Raft paper:
+  - Randomized election timeouts (800–1600 ms) with heartbeats every 250 ms; exactly one leader per term.
+  - Election restriction (§5.4.1): only candidates with an up-to-date log can win, so a stale rejoining node can never overwrite committed data.
+  - Leader appends a no-op entry on election so prior-term entries become committable after failover.
+  - Followers detect log conflicts, truncate their WAL from the divergence point, and rebuild in-memory state.
+  - Followers answer writes/reads with `ERR NOT_LEADER <host:port>`; the gateway follows the redirect, remembers the leader, and rotates through `AETHER_ENGINE_NODES` seeds when the leader dies.
+
+### Live Failover Demo
+With the stack running (`docker compose up --build`), run the scripted demo. It
+authenticates and writes real data **through the gateway** (the actual client
+path, not a raw engine connection), then:
+1. Prints every node's `STATUS` (role/term/commit).
+2. Writes N keys via the gateway, `docker kill`s the current leader, and polls
+   the survivors' `STATUS` to measure the precise election-to-recovery delta in ms.
+3. Verifies every pre-kill write is still correct via the gateway.
+4. Writes M more keys **while the old leader is still down**.
+5. `docker start`s it back, waits for it to rejoin, then reads its on-disk WAL
+   directly (a follower doesn't serve `GET`) to confirm it caught up on
+   **both** the pre-kill and the during-downtime writes.
+```bash
+cd aether-engine/scripts
+python3 raft_demo.py            # --num-keys / --downtime-keys to change volume
+```
+This is a repeatable, rerunnable script — safe to run live in an interview
+without typing commands by hand. Sample real output:
+```
+MEASURED ELECTION-TO-RECOVERY DELTA: 2351.2 ms
+PASS: all 30 pre-kill acknowledged writes correct on new leader.
+PASS: rejoined node's WAL contains all 45 acknowledged keys (30 pre-kill + 15 written during its downtime).
+PASS: full failover demo succeeded.
+```
+Note: the script reads a follower's WAL directly for step 5, so it reproduces
+the gateway's tenant-key encoding (`len(tenantId):tenantId:userKey` — see
+`StorageService.buildIsolatedKey`) rather than searching for the raw key.
+
+### Automated Safety Tests
+Two Python integration tests exercise the safety properties directly against
+local (non-Docker) processes, no manual steps required:
+- `aether-engine/scripts/raft_chaos_test.py` — basic write/kill/failover/rewrite smoke test.
+- `aether-engine/scripts/raft_safety_test.py` — the rigorous proof:
+  1. **Mid-load leader kill** (120 sequential writes, leader `kill -9`'d at write #40): every acknowledged write survives on the new leader.
+  2. **Follower catch-up**: a follower killed for 40 writes, then restarted, converges its WAL to match the leader exactly.
+  3. **Concurrent writers**: 8 threads (200 writes total) hammering the leader simultaneously, leader killed mid-flight: every acknowledged write survives. This specifically rules out concurrency bugs in overlapping in-flight proposals racing a crash — a different failure mode than sequential loss, though not a different safety guarantee (majority-commit-before-ack is what prevents loss either way).
+
+Run either with:
+```bash
+cd aether-engine
+mkdir -p build && cp <path-to-built-AetherDB-binary> build/
+python3 scripts/raft_safety_test.py
+```
+`aether-engine/scripts/raft_chaos_test.py` runs the same scenario as an automated local test (3 processes, no Docker needed).
+
+### Honest Limitations / Future Work
+- **No InstallSnapshot RPC**: snapshot compaction is disabled in cluster mode, so the Raft log grows unbounded; a rejoining node catches up by log replay, not snapshot transfer.
+- **No dynamic membership changes**: the 3-node topology is fixed at deploy time.
+- **No follower reads**: all reads are served by the leader for consistency; follower (stale) reads would be a throughput win.
+- **No pre-vote optimization**: a rejoining node can trigger one unnecessary re-election before settling.
+- **Client-gateway-engine protocol still hand-rolled**: only the Raft peer RPCs (`RequestVote`/`AppendEntries`) run over gRPC. The `SET`/`GET`/`DEL`/`STATUS` line protocol between the gateway and the engine is unchanged — a deliberate, scoped-first migration; extending gRPC to that path is a natural fast-follow now that the pattern (proto definitions, CMake integration, generated-code wiring) is proven.
 
 ---
 

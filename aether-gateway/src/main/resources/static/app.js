@@ -15,8 +15,24 @@ const registryTable = document.getElementById("registry-table").getElementsByTag
 
 // Initialize View
 document.addEventListener("DOMContentLoaded", () => {
+    // Parse Google OAuth redirect parameters if present
+    const urlParams = new URLSearchParams(window.location.search);
+    const token = urlParams.get("token");
+    const tenant = urlParams.get("tenant");
+    if (token && tenant) {
+        jwtToken = token;
+        currentTenant = tenant;
+        localStorage.setItem("jwt_token", jwtToken);
+        localStorage.setItem("tenant_id", currentTenant);
+        // Clear query parameters from URL without reloading
+        window.history.replaceState({}, document.title, window.location.pathname);
+    }
     checkAuthState();
 });
+
+function handleGoogleLogin() {
+    window.location.href = "/oauth2/authorization/google";
+}
 
 function checkAuthState() {
     if (jwtToken && currentTenant) {

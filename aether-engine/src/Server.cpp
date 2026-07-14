@@ -1,4 +1,5 @@
 #include "Server.hpp"
+#include "Raft.hpp"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
@@ -8,8 +9,8 @@
 #include <sstream>
 #include <algorithm>
 
-Server::Server(Engine& engine, int port)
-    : engine(engine), port(port) {}
+Server::Server(Engine& engine, int port, RaftNode* raft, int propose_timeout_ms)
+    : engine(engine), port(port), raft(raft), propose_timeout_ms(propose_timeout_ms) {}
 
 Server::~Server() {
     stop();
@@ -159,24 +160,63 @@ std::string Server::process_line(const std::string& line) {
         std::ws(iss);
         std::getline(iss, val);
         try {
-            engine.set(key, val);
-            return "OK\n";
+            if (raft) {
+                auto res = raft->propose('S', key, val, propose_timeout_ms);
+                if (res.status == RaftNode::ProposeStatus::NOT_LEADER) {
+                    return "ERR NOT_LEADER " + raft->get_leader_address() + "\n";
+                } else if (res.status == RaftNode::ProposeStatus::TIMEOUT) {
+                    return "ERR TIMEOUT\n";
+                }
+                return "OK\n";
+            } else {
+                engine.set(key, val);
+                return "OK\n";
+            }
         } catch (const std::exception& e) {
             return std::string("ERR ") + e.what() + "\n";
         }
     } else if (cmd == "GET") {
         if (!(iss >> key)) return "ERR syntax error\n";
+        if (raft) {
+            auto status = raft->get_status();
+            if (status.role != RaftRole::Leader) {
+                return "ERR NOT_LEADER " + raft->get_leader_address() + "\n";
+            }
+        }
         auto val_opt = engine.get(key);
         if (val_opt.has_value()) {
             return val_opt.value() + "\n";
         } else {
             return "(nil)\n";
         }
+    } else if (cmd == "STATUS") {
+        // Introspection: role/term/commit for demos and health checks.
+        if (raft) {
+            auto st = raft->get_status();
+            std::ostringstream oss;
+            oss << "role=" << raft_role_name(st.role)
+                << " term=" << st.term
+                << " commit=" << st.commit_index
+                << " last_log=" << st.last_log_index
+                << " leader=" << raft->get_leader_address() << "\n";
+            return oss.str();
+        }
+        return "role=STANDALONE\n";
     } else if (cmd == "DEL") {
         if (!(iss >> key)) return "ERR syntax error\n";
         try {
-            bool erased = engine.remove(key);
-            return erased ? "1\n" : "0\n";
+            if (raft) {
+                auto res = raft->propose('D', key, "", propose_timeout_ms);
+                if (res.status == RaftNode::ProposeStatus::NOT_LEADER) {
+                    return "ERR NOT_LEADER " + raft->get_leader_address() + "\n";
+                } else if (res.status == RaftNode::ProposeStatus::TIMEOUT) {
+                    return "ERR TIMEOUT\n";
+                }
+                return "1\n";
+            } else {
+                bool erased = engine.remove(key);
+                return erased ? "1\n" : "0\n";
+            }
         } catch (const std::exception& e) {
             return std::string("ERR ") + e.what() + "\n";
         }
