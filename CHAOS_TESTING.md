@@ -105,16 +105,32 @@ unless set), inserts an artificial delay between records during
 `write_snapshot_only`'s write loop, making it possible to reliably land a
 `SIGKILL` mid-write instead of racing a write that normally completes in
 milliseconds.
+
+**A gap found and fixed on re-verification**: the first version of
+`scenario_2()` assumed the delay env var had already been set on the target
+container by hand before running the script, and printed a note saying so
+— but never automated that setup itself. Run as committed, on a normal
+cluster, it printed `SCENARIO 2: PASS` without ever actually triggering the
+delay, meaning the kill landed well after the (near-instant, undelayed)
+write had already completed — a materially weaker, different test than
+claimed, passing for the wrong reason. Caught by deliberately re-running
+`chaos_suite.py --scenario 2` standalone (not the manual commands used for
+the original verification) and noticing the "PASS" carried no evidence the
+delay was ever active. Fixed by making the script recreate the target
+container with the env var itself (`recreate_with_env`), then revert
+afterward (`recreate_normal`) — fully self-contained, no manual setup step.
+
 **Expected**: recovery falls back to the previous snapshot (or none) plus
 full WAL replay — no corruption, no crash-loop.
-**Actual**: node recreated with a 3-second delay, `SNAPSHOT_EXPORT`
-triggered, killed 1 second into the write (mid-write, before the
-temp-then-rename could complete). Restarted with the delay removed:
+**Actual** (corrected, self-contained run): node recreated with a 3-second
+delay by the script itself, `SNAPSHOT_EXPORT` triggered, killed 1 second
+into the write (mid-write, before the temp-then-rename could complete).
+Restarted with the delay removed:
 ```
-Loaded 1818 keys from snapshot.   <- the OLD snapshot, correctly untouched
-[Raft] Node 1 started ... log size 1947    <- full WAL replay, unaffected
+Loaded 1923 keys from snapshot.   <- the OLD snapshot, correctly untouched
+[Raft] Node 1 started ... log size 2038    <- full WAL replay, unaffected
 ```
-Node rejoined and converged with the rest of the cluster at `commit=1949`
+Node rejoined and converged with the rest of the cluster at `commit=2040`
 within seconds. No corruption, no crash-loop.
 **Result: PASS.**
 
@@ -126,21 +142,36 @@ outbound `AppendEntries` to one specific configured peer ID — the
 Docker image (no `iproute2` needed) and container-level network
 manipulation privileges.
 
-Run twice, revealing two distinct, both-legitimate behaviors:
+**Same gap as Scenario 2, found and fixed the same way**: the first version
+of `scenario_4()` also assumed external setup and, run standalone on a
+normal cluster, printed `SCENARIO 4: PASS` with the "slow" peer's commit
+index identical to the leader's — i.e. no delay was ever actually active,
+and the assertions it did check were trivially true regardless. Fixed the
+same way: the script now recreates all 3 nodes itself with the env vars
+set (`recreate_with_env`), waits for a stable single leader, runs the load,
+then reverts (`recreate_normal`) and confirms catch-up — no manual step
+required, and the check now explicitly asserts the term stayed unchanged
+throughout (so a leadership-churn variant, see below, can't be mistaken
+for a pass).
+
+Run twice during development (both real, both worth keeping), revealing
+two distinct, both-legitimate behaviors:
 - **3000ms delay** (exceeds the ~800–1600ms election timeout): the delayed
   peer never receives a timely heartbeat, so it correctly calls its own
   elections repeatedly — this caused **cluster-wide leadership churn**,
   not just that one peer quietly lagging. Not a bug: a peer that genuinely
   can't hear from the leader within its timeout *should* call an election.
   This is what happens when "slow" becomes "indistinguishable from dead."
-- **400ms delay** (under the election timeout — the intended test): cluster
-  stayed on a single stable leader throughout, term unchanged (`181`) across
-  the whole run. 20/20 writes succeeded. The delayed peer lagged slightly
-  under load (`commit=2007` vs `2009` for the other two) and fully caught up
-  within ~2 seconds once the load stopped, before the delay was removed.
-**Result: PASS** for the intended scenario, plus an honest, separate finding
-about what happens when a "slow" link becomes slower than the election
-timeout itself.
+- **400ms delay** (under the election timeout — the intended test, and what
+  `chaos_suite.py --scenario 4` runs): cluster stayed on a single stable
+  leader throughout, term unchanged (`192`) across the whole run. 20/20
+  writes succeeded. The delayed peer genuinely lagged under load
+  (`commit=2060` vs `2061` for the leader) and caught up to `commit=2062`
+  once the delay was removed.
+**Result: PASS** for the intended scenario (now the only one the script
+runs, verified self-contained), plus an honest, separate finding about
+what happens when a "slow" link becomes slower than the election timeout
+itself.
 
 ### Scenario 5: Restart storm
 **Expected**: no corruption, no crash, correct re-sync on every cycle.

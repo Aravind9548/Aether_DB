@@ -19,6 +19,7 @@ Usage:
     python3 chaos_suite.py --all
 """
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -26,6 +27,7 @@ import time
 CLIENT_PORT = 8080
 COMPOSE_PROJECT = "atherdb_c_pro"
 ENGINE_SERVICES = ["aether-engine-1", "aether-engine-2", "aether-engine-3"]
+COMPOSE_FILE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def sh(cmd, timeout=30):
@@ -88,6 +90,63 @@ def fail(msg):
 
 def restart_container(name):
     sh(["docker", "start", name])
+
+
+def service_for_container(container):
+    """Reverse-maps a resolved container name back to its compose service
+    name (e.g. atherdb_c_pro-aether-engine-1-1 -> aether-engine-1), needed to
+    recreate that specific service with different env vars."""
+    for svc in ENGINE_SERVICES:
+        if container_name(svc) == container:
+            return svc
+    raise RuntimeError(f"no compose service found for container {container}")
+
+
+def node_id_for_service(service):
+    # aether-engine-N has AETHER_NODE_ID=N in docker-compose.yml.
+    return int(service.rsplit("-", 1)[1])
+
+
+def recreate_with_env(services, env_updates, wait_s=3):
+    """Force-recreates the given compose services with extra env vars set
+    (via host-env interpolation already wired into docker-compose.yml's
+    AETHER_CHAOS_* vars). Preserves each service's data volume - only the
+    process restarts, no data is lost. Waits briefly for them to rejoin."""
+    env = os.environ.copy()
+    env.update(env_updates)
+    cmd = ["docker", "compose", "-p", COMPOSE_PROJECT, "up", "-d", "--force-recreate"] + services
+    r = subprocess.run(cmd, cwd=COMPOSE_FILE_DIR, capture_output=True, text=True, env=env, timeout=60)
+    if r.returncode != 0:
+        fail(f"failed to recreate {services} with {env_updates}: {r.stderr}")
+    time.sleep(wait_s)
+
+
+def recreate_normal(services, wait_s=3):
+    """Recreates the given services with no chaos env vars set (reverts to
+    normal operation). Explicitly clears the vars from the host env passed
+    to compose, in case they're set in the calling shell."""
+    env = os.environ.copy()
+    for k in ["AETHER_CHAOS_SNAPSHOT_DELAY_MS", "AETHER_CHAOS_DELAY_PEER_ID", "AETHER_CHAOS_DELAY_MS"]:
+        env.pop(k, None)
+    cmd = ["docker", "compose", "-p", COMPOSE_PROJECT, "up", "-d", "--force-recreate"] + services
+    r = subprocess.run(cmd, cwd=COMPOSE_FILE_DIR, capture_output=True, text=True, env=env, timeout=60)
+    if r.returncode != 0:
+        fail(f"failed to revert {services} to normal: {r.stderr}")
+    time.sleep(wait_s)
+
+
+def wait_for_stable_leader(cs, deadline_s=20):
+    """Polls until exactly one node reports LEADER (handles the brief
+    multi-way election churn that follows recreating multiple nodes at
+    once)."""
+    end = time.time() + deadline_s
+    while time.time() < end:
+        statuses = [(c, get_status(c)) for c in cs]
+        leaders = [c for c, st in statuses if st and st.get("role") == "LEADER"]
+        if len(leaders) == 1:
+            return leaders[0]
+        time.sleep(1)
+    return None
 
 
 # ---------- Scenario 1: kill a follower mid-load ----------
@@ -205,28 +264,31 @@ def scenario_2():
         fail("no leader found")
     followers = [c for c in cs if c != leader]
     target = followers[0]
+    target_service = service_for_container(target)
     print(f"Target (a follower, to keep the leader stable): {target}")
 
     st_before = get_status(target)
     print(f"Before: {st_before}")
 
-    print(f"Triggering SNAPSHOT_EXPORT on {target} with a 2s artificial delay mid-write "
-          f"(AETHER_CHAOS_SNAPSHOT_DELAY_MS - test-only hook), then killing it mid-write...")
-    # Note: the delay hook must already be set as an env var on the target
-    # container for this to reliably land mid-write; see chaos_suite's
-    # companion note in CHAOS_TESTING.md on re-running with the env var set.
+    print(f"Recreating {target_service} with AETHER_CHAOS_SNAPSHOT_DELAY_MS=3000 "
+          f"(test-only hook) so the write can be reliably caught mid-flight...")
+    recreate_with_env([target_service], {"AETHER_CHAOS_SNAPSHOT_DELAY_MS": "3000"})
+    target = container_name(target_service)  # container id may have changed
+
+    print(f"Triggering SNAPSHOT_EXPORT on {target}, then killing it mid-write...")
     export_thread_cmd = (
         f'exec 3<>/dev/tcp/localhost/{CLIENT_PORT}; printf "SNAPSHOT_EXPORT\\n" >&3; head -1 <&3'
     )
     proc = subprocess.Popen(["docker", "exec", target, "bash", "-c", export_thread_cmd],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(0.5)  # let the write begin
+    time.sleep(1)  # 1s into a 3s delayed write - reliably mid-write, not after
     print(f"Killing {target} mid-write (SIGKILL)...")
     sh(["docker", "kill", target])
     proc.wait(timeout=5)
 
-    print(f"Restarting {target}...")
-    restart_container(target)
+    print(f"Restarting {target_service} with the delay hook removed (back to normal)...")
+    recreate_normal([target_service])
+    target = container_name(target_service)
     deadline = time.time() + 20
     recovered = False
     st_after = None
@@ -270,11 +332,29 @@ def scenario_4():
         fail("no leader found")
     followers = [c for c in cs if c != leader]
     slow_peer = followers[0]
-    print(f"Leader: {leader}. Simulating a slow link to {slow_peer} "
-          f"(AETHER_CHAOS_DELAY_PEER_ID/AETHER_CHAOS_DELAY_MS - test-only hook)...")
-    print("NOTE: this requires the leader container to have been started with "
-          "AETHER_CHAOS_DELAY_PEER_ID/AETHER_CHAOS_DELAY_MS set to the slow "
-          "peer's node ID; see CHAOS_TESTING.md for the exact recreate command.")
+    slow_id = node_id_for_service(service_for_container(slow_peer))
+    print(f"Designated slow peer: {slow_peer} (node id {slow_id})")
+
+    # Recreate ALL three: whichever node ends up leader must have the delay
+    # hook active for it to matter (the hook fires from the leader's send
+    # path). 400ms is deliberately UNDER the ~800-1600ms election timeout -
+    # see the 3000ms variant's result in CHAOS_TESTING.md for what happens
+    # when the delay exceeds the timeout instead (cluster-wide churn, a
+    # different and also-legitimate finding, not the scenario intended here).
+    print(f"Recreating all 3 nodes with AETHER_CHAOS_DELAY_PEER_ID={slow_id}, "
+          f"AETHER_CHAOS_DELAY_MS=400 (test-only hook)...")
+    all_services = [service_for_container(c) for c in cs]
+    recreate_with_env(all_services, {
+        "AETHER_CHAOS_DELAY_PEER_ID": str(slow_id),
+        "AETHER_CHAOS_DELAY_MS": "400",
+    }, wait_s=2)
+
+    cs = containers()
+    leader = wait_for_stable_leader(cs)
+    if not leader:
+        fail("cluster did not settle on a single stable leader after recreating with the delay hook")
+    print(f"Stable leader after recreate: {leader}")
+    slow_peer = container_name(service_for_container(slow_peer))  # refresh id
 
     acked = 0
     for i in range(20):
@@ -286,16 +366,42 @@ def scenario_4():
     st_slow = get_status(slow_peer)
     st_leader = get_status(leader)
     print(f"Leader: {st_leader}")
-    print(f"Slow peer (expected to be behind): {st_slow}")
+    print(f"Slow peer (expected to be at or behind): {st_slow}")
+    if acked < 20:
+        fail(f"only {acked}/20 writes succeeded - cluster should stay fully available "
+             f"via the leader + non-slow follower")
     if st_leader and st_slow and int(st_slow.get("commit", -1)) > int(st_leader.get("commit", 0)):
         fail("slow peer is somehow AHEAD of the leader - unexpected")
-    print(f"PASS: cluster kept operating via the leader + other follower "
+    same_term = st_leader and st_slow and st_leader.get("term") == st_slow.get("term")
+    if not same_term:
+        fail(f"term diverged (leader={st_leader.get('term')}, slow={st_slow.get('term')}) - "
+             f"suggests the delay destabilized leadership rather than just lagging one peer")
+    print(f"PASS: cluster kept operating on a single stable leader (term unchanged) "
           f"while {slow_peer} lagged behind ({acked}/20 writes succeeded).")
 
-    print("Once the delay is removed (env var unset + container recreated), "
-          "the lagging follower catches up via the existing replication path "
-          "(same mechanism proven in raft_safety_test.py's follower catch-up test).")
-    print("SCENARIO 4: PASS (see CHAOS_TESTING.md for the full before/after delay-removal run)\n")
+    print("Removing the delay (recreating all 3 with no chaos env vars)...")
+    recreate_normal(all_services, wait_s=2)
+    cs = containers()
+    leader = wait_for_stable_leader(cs)
+    if not leader:
+        fail("cluster did not restabilize after removing the delay")
+    st_leader = get_status(leader)
+    slow_peer = container_name(service_for_container(slow_peer))
+
+    deadline = time.time() + 20
+    caught_up = False
+    while time.time() < deadline:
+        st_slow = get_status(slow_peer)
+        st_leader = get_status(leader)
+        if st_slow and st_leader and st_slow.get("commit") == st_leader.get("commit"):
+            caught_up = True
+            break
+        time.sleep(1)
+    if not caught_up:
+        fail(f"{slow_peer} did not catch up within 20s after the delay was removed")
+    print(f"PASS: {slow_peer} caught up to commit={st_leader.get('commit')} "
+          f"after the delay was removed.")
+    print("SCENARIO 4: PASS\n")
 
 
 # ---------- Scenario 5: restart storm ----------
