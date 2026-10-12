@@ -38,6 +38,10 @@ message GetResponse {
   bool not_leader = 3;
   string leader_hint = 4;
   int32 shard_id = 5;
+  // "TIMEOUT" when the node could not confirm it is still the leader in
+  // time (ReadIndex) - e.g. it is cut off from the majority. Not found is
+  // found=false with an empty error.
+  string error = 6;
 }
 
 message DeleteRequest {

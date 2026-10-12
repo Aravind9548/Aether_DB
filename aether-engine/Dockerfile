@@ -29,11 +29,16 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Runtime shared libs for the gRPC Raft peer transport (not the -dev packages
-# needed for the build stage).
+# needed for the build stage). iptables/iproute2 are for the partition test
+# harness only (scripts/partition_test.py injects network partitions from
+# inside the container); they can't do anything unless the container is
+# granted NET_ADMIN, which only docker-compose.chaos.yml does.
 RUN apt-get update && apt-get install -y \
     libgrpc++1 \
     libgrpc10 \
     libprotobuf23 \
+    iptables \
+    iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /data

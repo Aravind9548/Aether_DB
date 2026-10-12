@@ -89,6 +89,10 @@ int main(int argc, char* argv[]) {
     if (const char* e = std::getenv("AETHER_DATA_DIR")) data_dir = e;
     int propose_timeout_ms = 5000;
     if (const char* e = std::getenv("AETHER_PROPOSE_TIMEOUT_MS")) propose_timeout_ms = std::atoi(e);
+    // Cluster mode: snapshot + compact the Raft log once this many applied
+    // entries have accumulated past the previous snapshot (0 disables).
+    long long snapshot_threshold = 1000;
+    if (const char* e = std::getenv("AETHER_SNAPSHOT_THRESHOLD")) snapshot_threshold = std::atoll(e);
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -143,6 +147,7 @@ int main(int argc, char* argv[]) {
         // Raft owns WAL loading/opening (v2) and applies committed entries.
         raft = std::make_unique<RaftNode>(node_id, peers, port + RAFT_PORT_OFFSET,
                                           engine, meta_path);
+        raft->set_snapshot_threshold(snapshot_threshold > 0 ? static_cast<uint64_t>(snapshot_threshold) : 0);
         if (!raft->start()) {
             std::cerr << "Failed to start Raft node." << std::endl;
             return 1;
@@ -156,8 +161,9 @@ int main(int argc, char* argv[]) {
     // Watcher thread to poll shutdown_flag and stop the server
     std::thread watcher(signal_watcher_thread, std::ref(server));
 
-    // Compactor thread running every 10s. Cluster mode disables compaction:
-    // truncating the Raft log requires InstallSnapshot support (future work).
+    // Compactor thread running every 10s - standalone mode only. Cluster
+    // mode compacts inside RaftNode instead (Raft-indexed snapshots, with
+    // InstallSnapshot for followers that fall behind the compacted prefix).
     std::atomic<bool> server_running{true};
     std::thread compactor;
     if (!cluster_mode) {

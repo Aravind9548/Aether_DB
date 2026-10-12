@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <chrono>
 #include <unistd.h>
+#include <fcntl.h>
 
 // v2 (Raft-log) WAL files begin with this magic; files without it are v1.
 static const char WAL_V2_MAGIC[] = "R2\n";
@@ -249,7 +250,16 @@ std::vector<WalRecord> WalManager::read_all_records() {
 
 bool WalManager::truncate_from(uint64_t index) {
     std::lock_guard<std::mutex> lock(wal_mutex);
+    return rewrite_wal_locked([index](const WalRecord& r) { return r.index < index; });
+}
 
+bool WalManager::compact_prefix(uint64_t through_index) {
+    std::lock_guard<std::mutex> lock(wal_mutex);
+    return rewrite_wal_locked([through_index](const WalRecord& r) { return r.index > through_index; });
+}
+
+template <typename Pred>
+bool WalManager::rewrite_wal_locked(Pred keep) {
     // Make sure everything appended so far is on disk before re-reading it.
     if (wal_file) {
         std::fflush(wal_file);
@@ -259,14 +269,14 @@ bool WalManager::truncate_from(uint64_t index) {
     if (!in) return false;
     if (!detect_v2(in)) {
         std::fclose(in);
-        std::cerr << "truncate_from requires a v2 WAL." << std::endl;
+        std::cerr << "WAL rewrite requires a v2 WAL." << std::endl;
         return false;
     }
 
     std::vector<WalRecord> kept;
     WalRecord rec;
     while (read_record_v2(in, rec)) {
-        if (rec.index < index) {
+        if (keep(rec)) {
             kept.push_back(rec);
         }
     }
@@ -294,14 +304,105 @@ bool WalManager::truncate_from(uint64_t index) {
         return false;
     }
 
+    fsync_parent_dir(wal_path);
     wal_file = std::fopen(wal_path.c_str(), "a+b");
     return wal_file != nullptr;
+}
+
+void WalManager::fsync_parent_dir(const std::string& path) {
+    // A rename is only durable once the directory entry itself is synced.
+    std::string dir = ".";
+    size_t slash = path.rfind('/');
+    if (slash != std::string::npos) dir = slash == 0 ? "/" : path.substr(0, slash);
+    int fd = ::open(dir.c_str(), O_RDONLY);
+    if (fd >= 0) {
+        ::fsync(fd);
+        ::close(fd);
+    }
+}
+
+static const char RAFT_SNAPSHOT_MAGIC[] = "RS2\n";
+static const size_t RAFT_SNAPSHOT_MAGIC_LEN = 4;
+
+bool WalManager::skip_raft_snapshot_header(FILE* f, uint64_t* last_index, uint64_t* last_term) {
+    char magic[RAFT_SNAPSHOT_MAGIC_LEN];
+    size_t n = std::fread(magic, 1, RAFT_SNAPSHOT_MAGIC_LEN, f);
+    if (n != RAFT_SNAPSHOT_MAGIC_LEN || std::memcmp(magic, RAFT_SNAPSHOT_MAGIC, RAFT_SNAPSHOT_MAGIC_LEN) != 0) {
+        std::fseek(f, 0, SEEK_SET);
+        return false;
+    }
+    uint64_t idx = 0, term = 0;
+    if (!read_length_line(f, idx) || !read_length_line(f, term)) {
+        std::fseek(f, 0, SEEK_SET);
+        return false;
+    }
+    if (last_index) *last_index = idx;
+    if (last_term) *last_term = term;
+    return true;
+}
+
+bool WalManager::write_raft_snapshot(const std::vector<std::pair<std::string, std::string>>& pairs,
+                                     uint64_t last_index, uint64_t last_term) {
+    std::string tmp_path = snapshot_path + ".tmp";
+    FILE* f = std::fopen(tmp_path.c_str(), "wb");
+    if (!f) return false;
+
+    std::fwrite(RAFT_SNAPSHOT_MAGIC, 1, RAFT_SNAPSHOT_MAGIC_LEN, f);
+    std::fprintf(f, "%llu\n%llu\n", static_cast<unsigned long long>(last_index),
+                 static_cast<unsigned long long>(last_term));
+    for (const auto& [k, v] : pairs) {
+        std::fputc('S', f);
+        std::fputc('\n', f);
+        std::fprintf(f, "%zu\n", k.size());
+        if (!k.empty()) std::fwrite(k.data(), 1, k.size(), f);
+        std::fprintf(f, "%zu\n", v.size());
+        if (!v.empty()) std::fwrite(v.data(), 1, v.size(), f);
+
+        // Same chaos hook as write_snapshot_only(): lets chaos_suite.py land
+        // a SIGKILL mid-write. Inert unless explicitly set.
+        if (const char* delay_ms = std::getenv("AETHER_CHAOS_SNAPSHOT_DELAY_MS")) {
+            int ms = std::atoi(delay_ms);
+            if (ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+        }
+    }
+
+    std::fflush(f);
+    fsync(fileno(f));
+    std::fclose(f);
+    if (std::rename(tmp_path.c_str(), snapshot_path.c_str()) != 0) {
+        std::remove(tmp_path.c_str());
+        return false;
+    }
+    // The WAL prefix is about to be discarded on the strength of this file,
+    // so the rename itself must be durable first.
+    fsync_parent_dir(snapshot_path);
+    return true;
+}
+
+bool WalManager::read_raft_snapshot(std::vector<std::pair<std::string, std::string>>& pairs,
+                                    uint64_t& last_index, uint64_t& last_term, bool* untagged) {
+    if (untagged) *untagged = false;
+    FILE* f = std::fopen(snapshot_path.c_str(), "rb");
+    if (!f) return false;
+    if (!skip_raft_snapshot_header(f, &last_index, &last_term)) {
+        if (untagged) *untagged = true;
+        std::fclose(f);
+        return false;
+    }
+    char op;
+    std::string key, val;
+    while (read_record(f, op, key, val)) {
+        if (op == 'S') pairs.emplace_back(key, val);
+    }
+    std::fclose(f);
+    return true;
 }
 
 bool WalManager::load_snapshot(LockManager& lm) {
     FILE* f = std::fopen(snapshot_path.c_str(), "rb");
     if (!f) return false;
-    
+    skip_raft_snapshot_header(f, nullptr, nullptr); // tolerate a Raft-tagged file
+
     int count = 0;
     char op;
     std::string key, val;

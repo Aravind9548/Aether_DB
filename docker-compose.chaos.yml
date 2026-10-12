@@ -1,0 +1,50 @@
+# Partition / linearizability test overlay - NOT for normal use.
+#
+#   docker compose -p aetherdb-chaos -f docker-compose.yml -f docker-compose.chaos.yml \
+#       up -d aether-engine-1 aether-engine-2 aether-engine-3
+#
+# Always run it under its own project name (-p aetherdb-chaos) so it gets its
+# own volumes and network and never touches the real cluster's data.
+# scripts/partition_test.py does all of this for you.
+#
+# What it adds on top of docker-compose.yml:
+#   - NET_ADMIN, so the harness can cut links between nodes with iptables
+#     inside each container (a real packet-level partition, not a simulated one);
+#   - the engines' text-protocol ports published on 127.0.0.1 only, so the test
+#     client can reach every node directly - including one that is partitioned
+#     away from its peers, which is exactly where stale reads would show up;
+#   - shorter propose timeout and a low snapshot threshold, so failed writes
+#     resolve quickly and log compaction / InstallSnapshot actually happen
+#     during a short test run.
+#   - AETHER_ENGINE_IMAGE lets the harness run a different build (e.g. the
+#     pre-fix code, to reproduce the original bugs).
+x-chaos-engine: &chaos-engine
+  image: ${AETHER_ENGINE_IMAGE:-aetherdb-engine:dev}
+  cap_add:
+    - NET_ADMIN
+  restart: "no"
+
+services:
+  aether-engine-1:
+    <<: *chaos-engine
+    ports:
+      - "127.0.0.1:18081:8080"
+    environment:
+      - AETHER_PROPOSE_TIMEOUT_MS=1500
+      - AETHER_SNAPSHOT_THRESHOLD=${AETHER_SNAPSHOT_THRESHOLD:-200}
+
+  aether-engine-2:
+    <<: *chaos-engine
+    ports:
+      - "127.0.0.1:18082:8080"
+    environment:
+      - AETHER_PROPOSE_TIMEOUT_MS=1500
+      - AETHER_SNAPSHOT_THRESHOLD=${AETHER_SNAPSHOT_THRESHOLD:-200}
+
+  aether-engine-3:
+    <<: *chaos-engine
+    ports:
+      - "127.0.0.1:18083:8080"
+    environment:
+      - AETHER_PROPOSE_TIMEOUT_MS=1500
+      - AETHER_SNAPSHOT_THRESHOLD=${AETHER_SNAPSHOT_THRESHOLD:-200}

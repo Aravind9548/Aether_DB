@@ -197,7 +197,72 @@ static void test_group_commit_flush_now() {
     std::cout << "test_group_commit_flush_now OK" << std::endl;
 }
 
+// Log compaction: compact_prefix drops the covered prefix, keeps the tail
+// appendable, and composes with truncate_from.
+static void test_compact_prefix() {
+    const std::string wal = "test_compact.wal", snap = "test_compact.snapshot";
+    cleanup(wal, snap);
+    WalManager wm(wal, snap);
+    CHECK(wm.open_wal_v2());
+    for (uint64_t i = 1; i <= 10; ++i) {
+        wm.append_entry(1, i, 'S', "k" + std::to_string(i), "v" + std::to_string(i));
+    }
+    CHECK(wm.compact_prefix(6)); // keep 7..10
+    auto recs = wm.read_all_records();
+    CHECK(recs.size() == 4);
+    CHECK(recs.front().index == 7 && recs.back().index == 10);
+
+    wm.append_entry(2, 11, 'S', "k11", "v11"); // still appendable after the rewrite
+    CHECK(wm.truncate_from(9));                // keep 7,8
+    recs = wm.read_all_records();
+    CHECK(recs.size() == 2 && recs[0].index == 7 && recs[1].index == 8);
+
+    CHECK(wm.compact_prefix(UINT64_MAX)); // empty log, header intact
+    CHECK(wm.read_all_records().empty());
+    wm.append_entry(3, 12, 'N', "", "");
+    recs = wm.read_all_records();
+    CHECK(recs.size() == 1 && recs[0].index == 12 && recs[0].op == 'N');
+    cleanup(wal, snap);
+    std::cout << "test_compact_prefix OK" << std::endl;
+}
+
+// Raft snapshots carry their log position; untagged (standalone) snapshots
+// are reported as such, and load_snapshot() accepts both formats.
+static void test_raft_snapshot() {
+    const std::string wal = "test_rsnap.wal", snap = "test_rsnap.snapshot";
+    cleanup(wal, snap);
+    WalManager wm(wal, snap);
+
+    std::vector<std::pair<std::string, std::string>> pairs = {
+        {"a", "1"}, {"bin", std::string("x\ny\0z", 5)}, {"empty", ""}};
+    CHECK(wm.write_raft_snapshot(pairs, 4242, 7));
+
+    std::vector<std::pair<std::string, std::string>> got;
+    uint64_t idx = 0, term = 0;
+    bool untagged = true;
+    CHECK(wm.read_raft_snapshot(got, idx, term, &untagged));
+    CHECK(!untagged && idx == 4242 && term == 7);
+    std::sort(got.begin(), got.end());
+    std::sort(pairs.begin(), pairs.end());
+    CHECK(got == pairs);
+
+    LockManager lm(4);
+    CHECK(wm.load_snapshot(lm)); // standalone loader skips the header
+    CHECK(lm.get("bin").value() == std::string("x\ny\0z", 5));
+    CHECK(lm.get("empty").value().empty());
+
+    // An untagged snapshot is not mistaken for a Raft one.
+    CHECK(wm.write_snapshot_only(lm));
+    got.clear();
+    CHECK(!wm.read_raft_snapshot(got, idx, term, &untagged));
+    CHECK(untagged);
+    cleanup(wal, snap);
+    std::cout << "test_raft_snapshot OK" << std::endl;
+}
+
 int main() {
+    test_compact_prefix();
+    test_raft_snapshot();
     test_v2_roundtrip();
     test_truncate_from();
     test_v1_compat();

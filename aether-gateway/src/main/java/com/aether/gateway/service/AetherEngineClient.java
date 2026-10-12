@@ -148,6 +148,12 @@ public class AetherEngineClient {
                     followRedirect(resp.getLeaderHint(), visited);
                     continue;
                 }
+                if (!resp.getError().isEmpty()) {
+                    // e.g. "TIMEOUT": the node couldn't confirm it still
+                    // leads (ReadIndex), so it refused rather than risk a
+                    // stale read. Never report this as "not found".
+                    throw new IOException("Engine operation failed: " + resp.getError());
+                }
                 Optional<String> value = resp.getFound() ? Optional.of(resp.getVal()) : Optional.empty();
                 return new GetResult(value, resp.getShardId());
             } catch (StatusRuntimeException e) {

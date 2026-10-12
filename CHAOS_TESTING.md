@@ -185,6 +185,323 @@ cycles.
 
 ---
 
+## Network Partitions & Linearizability
+
+### The headline: the "verified" Raft had three real bugs
+
+Before this work, the Raft implementation had passed every test written for
+it: leader killed mid-load with zero acknowledged-write loss, follower
+catch-up, concurrent writers, the five crash scenarios above. It was
+*demoed*. It was not *verified*: every one of those tests is a crash, and
+none checked what clients actually observe while nodes are up but unable to
+reach each other.
+
+The first time the cluster was tested under real network partitions, with a
+linearizability checker, it failed. Three real bugs, classified precisely
+because the difference matters:
+
+| # | Bug | Kind | What it violated |
+|---|-----|------|------------------|
+| 1 | Restart applied uncommitted log entries | **Consensus safety** | Raft's *State Machine Safety* property: a node applied entries at indexes 22–26 that the rest of the cluster later filled with different entries |
+| 2 | Cut-off leader served stale reads | **Linearizability** (read path) | The replicated log stayed correct, but clients were told something false. Raft §8 requires a leader to confirm leadership before serving reads; this code didn't |
+| 3 | Isolated follower inflated its term | **Availability** | No data at risk; one bad link forced a needless election when it healed |
+
+What it did **not** have: no acknowledged write was ever lost, in any run. That
+claim was checked directly, not assumed (see "harness mistakes" below; one run
+falsely suggested otherwise).
+
+### How the harness works
+
+- **Real packet-level partitions.** `iptables` rules inside each container
+  drop all traffic between chosen node IPs, in both directions, on both ends.
+  The engine doesn't know it's being tested. Client traffic from the host is
+  untouched, so the test can still talk to a cut-off node, which is where
+  stale reads happen.
+- **Isolated from real data.** A throwaway compose project
+  (`-p aetherdb-chaos`) plus the `docker-compose.chaos.yml` overlay adds
+  `NET_ADMIN`, publishes the engines on `127.0.0.1:18081-18083`, and sets a low
+  snapshot threshold. The real cluster's volumes are never touched.
+- **Linearizability checking with Porcupine**, the checker used by MIT
+  6.5840's Raft labs and etcd's robustness tests (`scripts/linearizability/`,
+  run in a `golang:1.22` container). Concurrent clients read and write unique
+  values; every operation is recorded with call/return times. Writes with an
+  unknown outcome (timeouts) may or may not have happened and are modelled
+  that way; failed reads are dropped. Porcupine checks each key's history
+  independently and reports each key's verdict, then the whole history.
+- **A verdict is only accepted from a checker that provably finished:** the
+  container's own exit code and `OOMKilled` flag are read back with
+  `docker inspect` (2 GB limit), and the run must report
+  `N/N keys verified, X/X operations covered`.
+- **Convergence** is checked exactly with a `DIGEST` command
+  (`applied=<index> keys=<n> hash=<fnv64>` over the applied state), not by
+  sampling keys.
+- **Before/after on identical settings.** The pre-fix code is `git archive
+  HEAD` built with the same Dockerfile (`aetherdb-engine:legacy`); the fixed
+  code is `aetherdb-engine:dev`.
+
+```bash
+docker build -t aetherdb-engine:dev aether-engine
+python aether-engine/scripts/partition_test.py --all                  # fixed build, ~4 min
+bash   aether-engine/scripts/clean_pass.sh                             # the full verification pass below
+```
+
+### Verification protocol: one clean pass on a stable runtime
+
+Docker Desktop crashed twice earlier in this work (once from a duplicate
+launch, once when a checker exhausted the VM's memory on an oversized
+history). Results gathered around a flapping runtime are suspect, so
+everything below comes from **one uninterrupted end-to-end pass**
+(`clean_pass.sh`) after those were fixed, with proof the runtime stayed up:
+
+```
+start: Sun Oct  4 20:50:38 IST 2026 | Docker VM uptime 2869.68s | sentinel started 2026-10-04T15:20:36.295213354Z
+1 partition suite, fixed build:            exit=0
+2 leader-isolation, pre-fix build:     exit=1 (expected 1)
+2 follower-isolation, pre-fix build:     exit=1 (expected 1)
+2 minority-writes, pre-fix build:     exit=1 (expected 1)
+3 chaos_suite --all:                       exit=0
+4 raft_demo (gateway failover):            exit=0
+5 wal_v2_test (unit):                      exit=0
+6 raft_safety_test (local 3-node):         exit=0
+end: Sun Oct  4 20:59:43 IST 2026 | Docker VM uptime 3360.99s | wall 542s | sentinel: true 2026-10-04T15:20:36.295213354Z
+RUNTIME STABLE: sentinel ran uninterrupted and VM uptime never reset
+```
+
+The sentinel is a container started at the beginning that must still be
+running, with the same start time, at the end; any daemon or VM restart
+kills it.
+
+### Did the checker actually finish? Completeness and memory
+
+A "LINEARIZABLE" line on its own proves nothing if the checker could have
+died partway through. A verdict is accepted only when all of these hold,
+enforced by the harness (`check_linearizable`):
+
+- the checker container's **exit code** and **`OOMKilled` flag**, read from
+  Docker after it stops (`docker inspect`), are `0` / `false`;
+- the number of operations the checker **read** equals the number the run
+  **recorded**;
+- for a pass, the operations in keys that individually returned Ok cover
+  **all** of them (Porcupine returns Ok only after finding a valid order;
+  a timeout gives Unknown, never Ok).
+
+The pass-#2 nemesis history file, counted independently: 6,922 records
+(3,494 ok puts, 4 unknown puts, 3,424 reads) across 8 keys, matching the
+checker's `8/8 keys verified, 6922/6922 operations covered`.
+
+**Why the original out-of-memory crash can't recur at this scale, and what
+did and didn't change:**
+
+| | First run (crashed) | Now |
+|---|---|---|
+| History size | 40,227 ops, unpaced clients | ~7–8k ops (paced); **hard cap 20,000**: anything larger is refused with "no verdict", never sent to the checker |
+| Unknown-outcome writes (what makes the search expensive) | 1,311 (pre-fix code) | 0–10 (fixed code: CheckQuorum turns most into clean `NOT_LEADER` rejections) |
+| Checker memory limit | none (shared the whole VM) | 2 GB container cap, so it can't take down the VM; if it's hit, `OOMKilled=true` means "no verdict" |
+| Docker VM memory | 3.9 GB | 3.9 GB (unchanged) |
+
+Three repeat runs of the 45 s nemesis on the fixed build, after these checks
+were added. Peak memory is the container's **resident** peak from cgroup
+`memory.peak` (it includes the `go run` toolchain), not the Go runtime's
+virtual reservation:
+
+| Run | Recorded | Checker read | Covered | Exit / OOMKilled | Peak resident |
+|---|---|---|---|---|---|
+| 1 | 7,063 | 7,063 | 7,063/7,063 | 0 / false | 34 MB |
+| 2 | 7,898 | 7,898 | 7,898/7,898 | 0 / false | 32 MB |
+| 3 | 7,604 | 7,604 | 7,604/7,604 | 0 / false | 32 MB |
+
+About 60× headroom under the cap, with the history size bounded: a
+repeatable margin, not luck. One honest caveat: *pre-fix* histories are far
+more expensive to check, because proving a violation means exhausting every
+order (one reserved 2.8 GB virtual and needed 10 minutes). The 2 GB cap and
+the "no verdict" rule mean that can fail closed, never pass by accident.
+
+### Bug 2: stale reads (before → after)
+
+Pre-fix, leader cut off from both peers for 10 s under a 6-client workload.
+The old leader still says `role=LEADER`, and clients still talking to it
+read old values:
+
+```
+  during partition: old leader node 3 says role=LEADER; majority side leader = node 2
+  stale read: client 2 read lin_k3='c3-89' from node 3 at +14.672s, but put('c5-98')
+              had completed at +9.750s (after put('c3-89') finished at +4.172s)
+  porcupine: history: 2951 operations (2916 with a definite result, 35 writes with unknown outcome, 1445 reads)
+  porcupine:   key lin_k3     630 ops: VIOLATION
+  porcupine:   key lin_k4     573 ops: VIOLATION
+  porcupine: RESULT: NOT LINEARIZABLE (checked in 1.32s)
+  checker container: exit=1 OOMKilled=false (2 GB limit)
+```
+
+Fixed, same scenario and settings:
+
+```
+  during partition: old leader node 3 says role=FOLLOWER; majority side leader = node 2
+  porcupine: history: 4462 operations (4458 with a definite result, 4 writes with unknown outcome, 2208 reads)
+  porcupine: per-key: 5/5 keys verified, 4462/4462 operations covered
+  porcupine: RESULT: LINEARIZABLE (checked in 33ms)
+  checker container: exit=0 OOMKilled=false (2 GB limit)
+```
+
+And under 45 s of a random node being cut off every few seconds:
+
+```
+  porcupine: history: 6922 operations (6918 with a definite result, 4 writes with unknown outcome, 3424 reads)
+  porcupine: per-key: 8/8 keys verified, 6922/6922 operations covered
+  porcupine: RESULT: LINEARIZABLE (checked in 43ms)
+  checker container: exit=0 OOMKilled=false (2 GB limit)
+```
+
+**Fix: ReadIndex** (Raft thesis §6.4). `GET` calls `RaftNode::read_barrier()`:
+the leader must have committed an entry from its own term, then a majority
+must acknowledge a heartbeat round sent *after* the read began. A cut-off
+leader can never collect that, so it answers `ERR TIMEOUT` instead of stale
+data. **Plus CheckQuorum:** a leader that no majority has acknowledged within
+the election-timeout window steps down, which is why the old leader now
+reports `FOLLOWER`, and new writes to it are rejected at once with
+`NOT_LEADER` instead of hanging (unknown-outcome writes: 35 → 4).
+
+### Bug 3: term inflation (before → after)
+
+Pre-fix, a follower cut off for 10 s:
+
+```
+  isolated follower's term, sampled each second while cut off: ['2','3','4','4','5','6','7','7','8','9']
+  after heal: node 1 role=LEADER term=12          # leader was in term 1; a needless election ran
+```
+
+Fixed:
+
+```
+  isolated follower's term, sampled each second while cut off: ['1','1','1','1','1','1','1','1','1','1']
+  PASS: node 1 is still leader in term 1 after the heal
+```
+
+**Fix: PreVote** (thesis §9.6). Before raising its term, a node asks "would
+you vote for me?" without changing anyone's state. Peers that can still hear a
+leader refuse, so a cut-off node never raises its term.
+
+### Bug 1: restart applied uncommitted entries (before → after)
+
+The leader is cut off, receives 5 writes it can't replicate (correctly never
+acknowledged: `ERR TIMEOUT` ×5), and is crash-restarted while still cut off.
+Pre-fix:
+
+```
+  cut-off node 2 before restart: commit=21 last_log=26; after restart: commit=26 last_log=26
+```
+
+`load_persistent_state()` set `commit_index` to the end of the log and
+applied everything. The node's state machine now held 5 writes the cluster
+never agreed to, at indexes 22–26, where the majority had already committed
+and applied *different* entries (its no-op and the majority's writes). Two
+nodes applying different entries at the same index is exactly what Raft's
+State Machine Safety property forbids. After the heal, reads through the
+leader showed none of the 5 writes and every majority write (`leaked []`,
+`missing []`), so clients never saw them through the leader. (The pre-fix
+build has no `DIGEST` command, so the old node's own state after the heal
+wasn't checked directly.) Fixed:
+
+```
+  cut-off node 3 before restart: commit=21 last_log=22; after restart: commit=0 last_log=22
+  PASS: none of the minority's writes survived the heal; every majority-acknowledged write survived
+```
+
+**Fix:** on startup only the snapshot is known committed; later entries are
+applied only once a leader confirms they're committed. (Only one minority
+write reached the log here, because CheckQuorum stepped the old leader down
+and the other four were rejected before being appended.)
+
+### Log compaction & InstallSnapshot
+
+Pre-fix, cluster mode never compacted. Truncating the WAL out from under Raft
+without a way to ship state to lagging followers would desync them, so the log
+grew forever: **41,698 bytes per node after 1,500 writes** (pre-fix
+`snapshot-catchup` run, re-measured on the stable stack, 21:01).
+
+Now, once `AETHER_SNAPSHOT_THRESHOLD` (default 1000) applied entries pile up
+past the last snapshot, a node writes a **Raft-indexed snapshot** (`RS2` header +
+last included index/term; temp-then-rename, file *and* directory fsynced),
+then drops that WAL prefix; a crash between the two is harmless. A follower
+that needs compacted entries gets an **`InstallSnapshot` RPC**, then the log
+tail. Fixed build, follower cut off while 1,500 writes land (threshold 200):
+
+```
+  node 1: [Raft] Node 1 installed snapshot from leader 2 (index 1432, term 1, 1431 keys)
+  PASS: follower caught up and converged {applied 1501, keys 1500, hash cbfef21bf6007fd5 on all 3}
+  WAL bytes per node after 1500 writes: {1: 2073, 2: 2073, 3: 2073}; log entries kept: 69 each
+  PASS: state identical after full-cluster restart (hash cbfef21bf6007fd5 before and after)
+```
+
+`SNAPSHOT_EXPORT` (used by `backup.py`) now takes a real Raft snapshot in
+cluster mode, and `backup.py` copies the WAL *before* the snapshot (the
+snapshot index only grows, so the later copy always covers where the WAL
+begins; the other order can leave a gap if auto-compaction runs mid-copy).
+
+**Upgrade path, verified on the real cluster's existing volumes:** the new
+build logged `Ignoring untagged snapshot file; the WAL holds the full log`,
+replayed the 2,169-entry WAL, compacted at index 2170, and all three nodes
+reported the same `keys=1962 hash=297edb7784b99732`.
+
+### Other changes made alongside
+
+- **`NOT_LEADER` is now unambiguous.** A leader that loses leadership *after*
+  appending a write returns `ERR TIMEOUT` (outcome unknown), never
+  `NOT_LEADER`, so `NOT_LEADER` always means "nothing was written" and clients
+  can treat it as a clean rejection.
+- **gRPC reconnect tuning.** Peer channels use 100 ms–1 s reconnect backoff plus
+  keepalive (gRPC's default backoff grows to 120 s), so a healed link starts
+  working again promptly.
+- **Follower match index** now reports only what the AppendEntries call
+  verified (prev index + entries), not the follower's whole log, per Raft
+  Figure 2. This is a latent issue, made reachable by the new 256-entry batch
+  cap. It was not observed failing, so it is not counted among the bugs above.
+
+### Harness mistakes, caught before they were reported
+
+The test tooling was wrong five times. Each one was found by re-checking
+results rather than trusting them, and none made it into a claim:
+
+1. **"Every acknowledged write lost."** A post-heal check counted any
+   non-matching reply as missing, including `ERR NOT_LEADER` during
+   leadership churn. Fixed to follow leader redirects and retry until a
+   definite answer: leaked `[]`, missing `[]`.
+2. **"Nemesis not linearizable"** was a crash, not a verdict: an unpaced 45 s
+   pre-fix run produced 40,227 operations (1,311 unknown-outcome writes) and
+   the checker exhausted the Docker VM's memory. Linearizability checking is
+   NP-hard, and proving a *violation* means exhausting every ordering. Fixed:
+   paced clients, memory-capped checker, exit code + `OOMKilled` read back,
+   only exit 1 counts as a violation.
+3. **A partition that leaked.** Re-partitioning flushed *every* node's rules
+   before re-adding them, so for a few hundred ms the whole cluster was
+   connected. In one pre-fix run the "cut off" node synced with the majority
+   mid-test (`last_log` 26 → 42), which made that run meaningless. Fixed:
+   each node flushes and re-adds in one step, and every link is blocked
+   from both ends. That run was discarded and the whole pass re-run.
+4. **A false "VM restarted" warning.** The first version of `clean_pass.sh`
+   required VM uptime to keep pace with wall time; WSL2's clock ran ~111 s
+   slow over 20 min under load. Replaced with the sentinel container.
+5. **Missing unit-test output.** Through `wsl.exe`, stdout and stderr reach
+   a Windows file through separate pipes; `> file 2>&1` let stderr overwrite
+   the first lines of stdout, hiding `test_compact_prefix OK` and
+   `test_raft_snapshot OK`. Fixed by merging inside WSL; re-run (outside the
+   sentinel window, a pure unit test): 8/8 with visible output.
+
+### Regression: the pre-existing suites (same clean pass)
+
+- `chaos_suite.py --all`: scenarios 1–5 **PASS**. In scenario 3 (majority
+  killed), the survivor now stays `FOLLOWER` at a fixed term instead of cycling
+  as a `CANDIDATE`; that's PreVote, and it's the better behaviour.
+- `raft_safety_test.py` (local 3-process cluster): 120 writes with leader
+  killed, follower catch-up (160 keys), 8 concurrent writers (200/200):
+  **ALL PASS**.
+- `raft_demo.py` through the gateway: failover **2269.5 ms**, 30 pre-kill + 15
+  downtime writes verified (its check now reads snapshot + WAL tail, since
+  compacted keys live in the snapshot).
+- `wal_v2_test`: **8/8**, including `test_compact_prefix` and `test_raft_snapshot`.
+
+---
+
 ## Summary
 
 | # | Scenario | Result |
@@ -195,6 +512,11 @@ cycles.
 | 2 | Kill mid-snapshot-write | PASS |
 | 4 | Simulated slow peer | PASS (two variants tested) |
 | 5 | Restart storm (5x) | PASS |
+| P1 | Leader cut off mid-workload (Porcupine) | Pre-fix: NOT LINEARIZABLE → fixed: LINEARIZABLE (4462/4462 ops) |
+| P2 | Follower cut off (term inflation) | Pre-fix: forced election, term 1→12 → fixed: term stays 1 |
+| P3 | Minority writes + restart while cut off | Pre-fix: restart committed 5 uncommitted entries → fixed: PASS |
+| P4 | 45s random-partition nemesis (Porcupine) | Fixed: LINEARIZABLE, 6922/6922 ops, 8/8 keys |
+| P5 | Follower behind compacted log (InstallSnapshot) + full restart | Fixed: PASS (no cluster compaction pre-fix) |
 
 Two chaos-testing-only instrumentation hooks were added to support this
 suite (`AETHER_CHAOS_SNAPSHOT_DELAY_MS`, `AETHER_CHAOS_DELAY_PEER_ID` /

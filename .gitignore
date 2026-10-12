@@ -23,3 +23,6 @@ AetherDB
 .DS_Store
 *.swp
 *.log
+
+# Partition / linearizability test output (scripts/partition_test.py)
+chaos-results/

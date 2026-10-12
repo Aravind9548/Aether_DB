@@ -73,6 +73,25 @@ public:
     // Rewrites the file atomically and reopens it for appends.
     bool truncate_from(uint64_t index);
 
+    // Drop every record with rec.index <= through_index (v2 WALs only) -
+    // the log-compaction half of a Raft snapshot. Same atomic rewrite as
+    // truncate_from. Pass UINT64_MAX to empty the log entirely.
+    bool compact_prefix(uint64_t through_index);
+
+    // --- Raft snapshots (cluster mode) ---
+    // Unlike the untagged standalone snapshot below, a Raft snapshot records
+    // the log position it represents ("RS2" header + last_included index and
+    // term), which is what lets the WAL prefix up to that index be discarded
+    // and lets a leader ship it to a lagging follower via InstallSnapshot.
+    // Written temp-then-rename and fsynced (file and directory) before any
+    // WAL compaction relies on it.
+    bool write_raft_snapshot(const std::vector<std::pair<std::string, std::string>>& pairs,
+                             uint64_t last_index, uint64_t last_term);
+    // False if there is no snapshot file or it is an untagged (standalone /
+    // pre-compaction SNAPSHOT_EXPORT) one; `untagged` says which.
+    bool read_raft_snapshot(std::vector<std::pair<std::string, std::string>>& pairs,
+                            uint64_t& last_index, uint64_t& last_term, bool* untagged = nullptr);
+
     // Compaction / Snapshotting
     bool write_snapshot(LockManager& lm);
 
@@ -98,6 +117,13 @@ private:
     // Leaves the position after the magic if found, at the start otherwise.
     bool detect_v2(FILE* f);
     void write_record_v2(FILE* f, const WalRecord& rec);
+    // Atomically rewrites the v2 WAL keeping only records for which keep()
+    // is true, then reopens it for appends. Caller must hold wal_mutex.
+    template <typename Pred>
+    bool rewrite_wal_locked(Pred keep);
+    // Skips the "RS2" Raft-snapshot header if present; returns whether it was.
+    bool skip_raft_snapshot_header(FILE* f, uint64_t* last_index, uint64_t* last_term);
+    void fsync_parent_dir(const std::string& path);
 
     // --- Group-commit state (guarded by wal_mutex) ---
     uint64_t next_ticket = 0;

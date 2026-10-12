@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Backs up a running AetherDB node: triggers a non-destructive snapshot
-export (SNAPSHOT_EXPORT), then copies the snapshot, the full WAL, and
-raft.meta out of the container into a local backup directory.
+Backs up a running AetherDB node: triggers a Raft snapshot
+(SNAPSHOT_EXPORT - in cluster mode this also compacts the WAL prefix the
+snapshot covers), then copies the WAL, the snapshot and raft.meta out of
+the container into a local backup directory. Snapshot + remaining WAL is
+the node's complete log.
 
 This is independent of Raft: Raft protects against losing a MINORITY of
 nodes (the cluster keeps working, no committed data lost). It does NOT
@@ -54,13 +56,18 @@ def main():
     if resp != "OK":
         print(f"FAIL: SNAPSHOT_EXPORT returned: {resp!r}")
         sys.exit(1)
-    print("Snapshot export succeeded (WAL untouched - non-destructive).")
+    print("Snapshot export succeeded (Raft snapshot written; WAL prefix it covers compacted).")
 
     timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     backup_dir = f"{args.out_dir}/{timestamp}"
     os.makedirs(backup_dir, exist_ok=True)
 
-    files_to_copy = ["aether.snapshot", "aether.wal", "raft.meta"]
+    # WAL before snapshot, deliberately: the node may auto-compact while we
+    # copy. The snapshot index only ever grows, so a snapshot copied later
+    # still covers everything up to where the earlier-copied WAL begins.
+    # The other order can pair an old snapshot with a WAL that was compacted
+    # past it, leaving a gap in the log.
+    files_to_copy = ["aether.wal", "aether.snapshot", "raft.meta"]
     copied = []
     for fname in files_to_copy:
         src = f"{args.container}:{DATA_DIR_IN_CONTAINER}/{fname}"

@@ -10,6 +10,8 @@
 #include <iostream>
 #include <sstream>
 #include <algorithm>
+#include <tuple>
+#include <cstdio>
 
 // Client gRPC (SET/GET/DEL) listens at client port + this offset. STATUS and
 // the raw-TCP text protocol stay on the original port (Phase B scoping
@@ -61,6 +63,7 @@ public:
         response->set_not_leader(r.not_leader);
         response->set_leader_hint(to_grpc_leader_hint(r.leader_hint));
         response->set_shard_id(r.shard_id);
+        response->set_error(r.error);
         return grpc::Status::OK;
     }
 
@@ -336,10 +339,17 @@ Server::ClientOpResult Server::do_get(const std::string& key) {
     ClientOpResult r;
     r.shard_id = static_cast<int>(engine.get_lock_manager().shard_of(key));
     if (raft) {
-        auto status = raft->get_status();
-        if (status.role != RaftRole::Leader) {
+        // Linearizable read (ReadIndex): only answer once a majority has
+        // confirmed we're still the leader. Checking our own role alone is
+        // not enough - a leader cut off by a partition still believes it.
+        auto rs = raft->read_barrier(propose_timeout_ms);
+        if (rs == RaftNode::ReadStatus::NOT_LEADER) {
             r.not_leader = true;
             r.leader_hint = raft->get_leader_address();
+            return r;
+        }
+        if (rs == RaftNode::ReadStatus::TIMEOUT) {
+            r.error = "TIMEOUT";
             return r;
         }
     }
@@ -404,6 +414,7 @@ std::string Server::process_line(const std::string& line) {
         if (!(iss >> key)) return "ERR syntax error\n";
         auto r = do_get(key);
         if (r.not_leader) return "ERR NOT_LEADER " + r.leader_hint + "\n";
+        if (r.error == "TIMEOUT") return "ERR TIMEOUT\n";
         return r.value.has_value() ? r.value.value() + "\n" : "(nil)\n";
     } else if (cmd == "STATUS") {
         // Introspection: role/term/commit for demos and health checks.
@@ -414,6 +425,9 @@ std::string Server::process_line(const std::string& line) {
                 << " term=" << st.term
                 << " commit=" << st.commit_index
                 << " last_log=" << st.last_log_index
+                << " applied=" << st.last_applied
+                << " snapshot=" << st.snapshot_index
+                << " log_entries=" << st.log_entries
                 << " leader=" << raft->get_leader_address() << "\n";
             return oss.str();
         }
@@ -423,7 +437,34 @@ std::string Server::process_line(const std::string& line) {
         // WAL (safe in cluster mode - see Engine::export_snapshot). The
         // actual file is retrieved separately (e.g. `docker cp`), same as
         // how raft_demo.py already reads a follower's WAL directly.
-        return engine.export_snapshot() ? "OK\n" : "ERR snapshot export failed\n";
+        // In cluster mode this is a real Raft snapshot (tagged with its log
+        // index, then the WAL prefix it covers is compacted) - the only kind
+        // that is safe to write alongside a compacting log.
+        bool ok = raft ? raft->snapshot_now() : engine.export_snapshot();
+        return ok ? "OK\n" : "ERR snapshot export failed\n";
+    } else if (cmd == "DIGEST") {
+        // Convergence check for the partition tests: a hash of the applied
+        // state plus the log index it reflects. Two nodes with the same
+        // applied index must report the same hash.
+        uint64_t applied = 0;
+        std::vector<std::pair<std::string, std::string>> pairs;
+        if (raft) {
+            std::tie(applied, pairs) = raft->applied_state();
+        } else {
+            pairs = engine.get_lock_manager().get_all_pairs();
+        }
+        std::sort(pairs.begin(), pairs.end());
+        uint64_t h = 1469598103934665603ULL; // FNV-1a 64
+        auto mix = [&h](const std::string& str) {
+            for (unsigned char c : str) { h ^= c; h *= 1099511628211ULL; }
+            h ^= 0xff; h *= 1099511628211ULL; // field separator
+        };
+        for (const auto& [k, v] : pairs) { mix(k); mix(v); }
+        char hex[17];
+        std::snprintf(hex, sizeof(hex), "%016llx", static_cast<unsigned long long>(h));
+        std::ostringstream oss;
+        oss << "applied=" << applied << " keys=" << pairs.size() << " hash=" << hex << "\n";
+        return oss.str();
     } else if (cmd == "DEL") {
         if (!(iss >> key)) return "ERR syntax error\n";
         auto r = do_delete(key);

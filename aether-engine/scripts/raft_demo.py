@@ -203,12 +203,39 @@ def write_keys_via_gateway(token, keys_vals, label):
 
 # ---------- WAL read (only way to check a follower's data; it doesn't serve GET) ----------
 
+SNAPSHOT_PATH_IN_CONTAINER = "/data/aether.snapshot"
+
+
+def read_snapshot_state(container, path=SNAPSHOT_PATH_IN_CONTAINER):
+    """(state, last_included_index) from a node's snapshot file; ({}, 0) if it
+    has none. Raft snapshots start with "RS2\\n<index>\\n<term>\\n"; an untagged
+    (pre-compaction) one covers nothing the WAL doesn't also hold."""
+    r = sh_bytes(["docker", "exec", container, "sh", "-c", f"cat {path} 2>/dev/null || true"])
+    data = r.stdout
+    if not data.startswith(b"RS2\n"):
+        return {}, 0
+    i = 4
+    j = data.index(b"\n", i); snap_index = int(data[i:j]); i = j + 1
+    j = data.index(b"\n", i); i = j + 1  # term
+    state = {}
+    while i < len(data):
+        j = data.index(b"\n", i); i = j + 1  # op ("S")
+        j = data.index(b"\n", i); klen = int(data[i:j]); i = j + 1
+        key = data[i:i + klen].decode(); i += klen
+        j = data.index(b"\n", i); vlen = int(data[i:j]); i = j + 1
+        state[key] = data[i:i + vlen].decode(); i += vlen
+    return state, snap_index
+
+
 def read_wal_final_state(container, path=WAL_PATH_IN_CONTAINER):
+    """A node's durable state: its snapshot (if any) plus the WAL entries
+    after it. With log compaction, older entries live only in the snapshot,
+    so reading the WAL alone would miss keys that were never lost."""
+    state, snap_index = read_snapshot_state(container)
     r = sh_bytes(["docker", "exec", container, "cat", path])
     data = r.stdout
     if data[:3] != b"R2\n":
         raise RuntimeError(f"{container}:{path} is not a v2 WAL (got {data[:20]!r})")
-    state = {}
     i = 3
 
     def line():
@@ -220,12 +247,17 @@ def read_wal_final_state(container, path=WAL_PATH_IN_CONTAINER):
 
     while i < len(data):
         op = line().decode()
-        line(); line()  # term, index (unused here)
+        line()  # term
+        index = int(line())
         klen = int(line())
         key = data[i:i + klen].decode(); i += klen
+        val = None
         if op == "S":
             vlen = int(line())
             val = data[i:i + vlen].decode(); i += vlen
+        if index <= snap_index:
+            continue  # already reflected in the snapshot
+        if op == "S":
             state[key] = val
         elif op == "D":
             state.pop(key, None)
