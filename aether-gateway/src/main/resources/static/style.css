@@ -2,6 +2,7 @@
 :root {
     --bg-primary: #080c16;
     --bg-secondary: rgba(15, 23, 42, 0.45);
+    --bg-secondary-muted: rgba(15, 23, 42, 0.25);
     --border-color: rgba(255, 255, 255, 0.08);
     --glow-cyan: #00f0ff;
     --glow-purple: #8a2be2;
@@ -10,9 +11,14 @@
     --text-muted: #64748b;
     --success: #10b981;
     --error: #ef4444;
+    --warning: #f59e0b;
+    --success-glow: 0 0 8px rgba(16, 185, 129, 0.6);
+    --danger-glow: 0 0 0 1px rgba(239, 68, 68, 0.35), 0 0 14px rgba(239, 68, 68, 0.3);
+    --danger-glow-strong: 0 0 0 1px rgba(239, 68, 68, 0.6), 0 0 22px rgba(239, 68, 68, 0.55);
     --border-radius: 14px;
     --font-outfit: 'Outfit', sans-serif;
     --font-inter: 'Inter', sans-serif;
+    --font-mono: 'JetBrains Mono', 'IBM Plex Mono', monospace;
 }
 
 * {
@@ -101,11 +107,15 @@ body {
 
 .status-indicator.online {
     background-color: var(--success);
-    box-shadow: 0 0 8px var(--success);
+    box-shadow: var(--success-glow);
 }
 
 .status-indicator.offline {
     background-color: var(--text-muted);
+}
+
+.status-text.font-mono {
+    font-size: 0.85rem;
 }
 
 /* Auth Card and Forms */
@@ -182,6 +192,14 @@ body {
     margin-top: -8px;
 }
 
+/* The -8px above assumes a flex-column parent with its own `gap` already
+   providing baseline spacing (e.g. .auth-form) - it overlaps the heading
+   when the subtitle sits directly under an h3 with no such gap (e.g. a
+   card-header's title block, stacked next to an action button). */
+.card-header .subtitle {
+    margin-top: 4px;
+}
+
 .input-group {
     display: flex;
     flex-direction: column;
@@ -245,6 +263,10 @@ body {
     grid-column: span 2;
 }
 
+.span-3-col {
+    grid-column: span 3;
+}
+
 .dashboard-card {
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
@@ -253,6 +275,23 @@ body {
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+}
+
+/* Secondary panels (Telemetry, Tenant Key Registry) - reduced visual weight
+   so the Database Operations panel and Engine Log Ticker read as primary. */
+.dashboard-card.card-secondary {
+    background: var(--bg-secondary-muted);
+    padding: 1.2rem 1.4rem;
+    box-shadow: none;
+}
+
+.card-secondary .card-header {
+    margin-bottom: 1rem;
+}
+
+.card-secondary .card-header h3 {
+    font-size: 1.05rem;
+    color: var(--text-secondary);
 }
 
 .card-header {
@@ -324,26 +363,48 @@ body {
     color: white;
 }
 
+/* GET is the safe, non-destructive default action - deliberately quiet so it
+   doesn't compete with DEL for attention. No brand-cyan fill here on purpose. */
 .get-btn {
-    background: rgba(0, 240, 255, 0.1);
-    color: var(--glow-cyan);
-    border: 1px solid rgba(0, 240, 255, 0.2);
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
 }
 
 .get-btn:hover {
-    background: var(--glow-cyan);
-    color: #080c16;
+    background: rgba(255, 255, 255, 0.07);
+    color: var(--text-primary);
+    border-color: rgba(255, 255, 255, 0.18);
 }
 
+/* DEL is destructive - it should visibly carry that weight even at rest,
+   not just on hover/confirm. Real fill + glow, not a thin outline. */
 .del-btn {
-    background: rgba(239, 68, 68, 0.1);
-    color: var(--error);
-    border: 1px solid rgba(239, 68, 68, 0.2);
+    background: rgba(239, 68, 68, 0.22);
+    color: #fecaca;
+    border: 1px solid rgba(239, 68, 68, 0.6);
+    box-shadow: var(--danger-glow);
 }
 
 .del-btn:hover {
     background: var(--error);
     color: white;
+    box-shadow: var(--danger-glow-strong);
+}
+
+/* Destructive-action confirmation state - a real safety gate, not just color.
+   First click arms the button; a second click within the window executes. */
+.del-btn.confirm-armed {
+    background: var(--error);
+    color: white;
+    border-color: var(--error);
+    box-shadow: var(--danger-glow-strong);
+    animation: dangerPulse 1s ease-in-out infinite;
+}
+
+@keyframes dangerPulse {
+    0%, 100% { box-shadow: var(--danger-glow-strong); }
+    50% { box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.8), 0 0 28px rgba(239, 68, 68, 0.75); }
 }
 
 /* Telemetry styles */
@@ -367,12 +428,16 @@ body {
 }
 
 .stat-val {
+    font-family: var(--font-mono);
     font-weight: 600;
-    font-size: 1rem;
+    font-size: 0.95rem;
 }
 
 .accent-text { color: var(--glow-cyan); }
-.green-text { color: var(--success); }
+.green-text {
+    color: var(--success);
+    text-shadow: var(--success-glow);
+}
 
 /* Table styles */
 .table-container {
@@ -398,30 +463,79 @@ body {
 
 .data-table td {
     color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
 }
 
 .text-muted { color: var(--text-muted); }
 .text-center { text-align: center; }
 
-/* Console terminal card */
+/* Console terminal card - promoted to the primary visual element */
 .terminal-card {
     display: flex;
     flex-direction: column;
+    border-color: rgba(0, 240, 255, 0.15);
+}
+
+.live-indicator {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: var(--success);
+}
+
+.live-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: var(--success-glow);
+    animation: livePulse 1.4s ease-in-out infinite;
+}
+
+@keyframes livePulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.75); }
 }
 
 .terminal-body {
     background: #04060b;
     border: 1px solid rgba(255, 255, 255, 0.05);
     border-radius: 8px;
-    font-family: monospace;
-    font-size: 0.8rem;
-    padding: 12px;
-    min-height: 180px;
-    max-height: 180px;
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    padding: 14px;
+    min-height: 340px;
+    max-height: 340px;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 6px;
+}
+
+.terminal-cursor-line {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    padding: 8px 14px 0;
+}
+
+.prompt-caret {
+    color: var(--glow-cyan);
+    margin-right: 6px;
+}
+
+.blink-cursor {
+    animation: blinkCursor 1s step-end infinite;
+}
+
+@keyframes blinkCursor {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
 }
 
 .log-line {
@@ -435,6 +549,7 @@ body {
 
 /* Helper classes */
 .hidden { display: none !important; }
+.font-mono { font-family: var(--font-mono); }
 .auth-message {
     padding: 10px;
     border-radius: 6px;
@@ -523,4 +638,167 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
+}
+
+/* Nav Link Button for Cluster Console */
+.nav-links {
+    display: flex;
+    align-items: center;
+}
+
+.nav-link-btn {
+    color: var(--glow-cyan);
+    text-decoration: none;
+    font-family: var(--font-outfit);
+    font-weight: 600;
+    font-size: 0.95rem;
+    padding: 6px 14px;
+    background: rgba(0, 240, 255, 0.05);
+    border: 1px solid rgba(0, 240, 255, 0.2);
+    border-radius: 30px;
+    transition: all 0.3s;
+    box-shadow: 0 0 10px rgba(0, 240, 255, 0.15);
+}
+
+.nav-link-btn:hover {
+    background: var(--glow-cyan);
+    color: var(--bg-primary);
+    box-shadow: 0 0 15px rgba(0, 240, 255, 0.4);
+    transform: translateY(-1px);
+}
+
+/* Cluster Console styling overrides/extensions */
+.cluster-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1.5rem;
+}
+
+.topology-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1.5rem;
+    margin-bottom: 2rem;
+}
+
+.node-card {
+    position: relative;
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
+    padding: 1.5rem;
+    background: var(--bg-secondary);
+    backdrop-filter: blur(12px);
+    transition: all 0.3s ease;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.node-card.leader {
+    border-color: rgba(16, 185, 129, 0.4);
+    box-shadow: 0 0 15px rgba(16, 185, 129, 0.15);
+}
+
+.node-card.unhealthy {
+    border-color: rgba(239, 68, 68, 0.3);
+    opacity: 0.65;
+}
+
+.node-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.node-title {
+    font-family: var(--font-outfit);
+    font-weight: 600;
+    font-size: 1.15rem;
+    color: var(--text-primary);
+}
+
+.role-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+}
+
+.node-card.leader .role-badge {
+    background: rgba(16, 185, 129, 0.1);
+    color: var(--success);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+    box-shadow: var(--success-glow);
+}
+
+.crown-icon {
+    width: 12px;
+    height: 12px;
+    fill: currentColor;
+}
+
+.node-stats {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.node-stat-item {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.85rem;
+}
+
+.node-stat-label {
+    color: var(--text-secondary);
+}
+
+.node-stat-val {
+    font-family: var(--font-mono);
+    color: var(--text-primary);
+}
+
+/* Batch row styling */
+.batch-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+    margin-bottom: 1.2rem;
+}
+
+.batch-row {
+    display: flex;
+    gap: 0.8rem;
+    align-items: center;
+}
+
+.batch-remove-btn {
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.2);
+    color: var(--error);
+    border-radius: 8px;
+    width: 38px;
+    height: 38px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.2rem;
+    transition: all 0.2s;
+}
+
+.batch-remove-btn:hover {
+    background: var(--error);
+    color: white;
+}
+
+.batch-actions {
+    display: flex;
+    gap: 1rem;
 }

@@ -35,25 +35,28 @@ function handleGoogleLogin() {
 }
 
 function checkAuthState() {
+    const navLinks = document.getElementById("nav-links");
     if (jwtToken && currentTenant) {
         // Show Dashboard
         authView.classList.add("hidden");
         dashboardView.classList.remove("hidden");
+        if (navLinks) navLinks.classList.remove("hidden");
         
         // Update Nav Status
         userStatusArea.innerHTML = `
             <span class="status-indicator online"></span>
-            <span class="status-text">Active: ${currentTenant}</span>
+            <span class="status-text font-mono">Active: ${currentTenant}</span>
             <button class="logout-btn" onclick="logout()">Logout</button>
         `;
         
-        document.getElementById("namespace-text").textContent = `len:${currentTenant}`;
+        document.getElementById("namespace-text").textContent = `${currentTenant.length}:${currentTenant}`;
         writeConsole("system", `[Auth] Authenticated session active for tenant "${currentTenant}".`);
         updateRegistryTable();
     } else {
         // Show Auth Panel
         authView.classList.remove("hidden");
         dashboardView.classList.add("hidden");
+        if (navLinks) navLinks.classList.add("hidden");
         
         // Update Nav Status
         userStatusArea.innerHTML = `
@@ -134,6 +137,23 @@ async function handleAuth(event, type) {
     }
 }
 
+// DEL is destructive - require a second click within a short window before
+// it actually executes, instead of firing immediately like SET/GET.
+function handleDelClick(btn, key) {
+    armDestructiveAction(btn, {
+        defaultText: "DEL",
+        confirmText: "Confirm?",
+        armedClass: "confirm-armed",
+        timeoutMs: 4000,
+        onExecute: () => {
+            if (key !== undefined) {
+                document.getElementById("op-key").value = key;
+            }
+            executeOp("DEL");
+        }
+    });
+}
+
 // Execute DB Operation
 async function executeOp(op) {
     const keyInput = document.getElementById("op-key");
@@ -177,8 +197,20 @@ async function executeOp(op) {
 
         const text = await response.text();
         
+        const shardId = response.headers.get("X-Shard-Id");
+        const replicatedCount = response.headers.get("X-Replicated-Count");
+        const clusterSize = response.headers.get("X-Cluster-Size");
+        
+        let metaSuffix = "";
+        if (shardId !== null) {
+            metaSuffix += `  ·  shard ${shardId}`;
+        }
+        if (replicatedCount !== null && clusterSize !== null) {
+            metaSuffix += `  ·  replicated ${replicatedCount}/${clusterSize}`;
+        }
+
         if (response.ok) {
-            writeConsole("recv", `[RESP] (status: ${response.status}) -> ${text}`);
+            writeConsole("recv", `[RESP] (status: ${response.status}) -> ${text}${metaSuffix}`);
             
             if (op === "SET") {
                 sessionKeys[key] = { value: val, updated: new Date().toLocaleTimeString() };
@@ -191,7 +223,7 @@ async function executeOp(op) {
             localStorage.setItem("session_keys", JSON.stringify(sessionKeys));
             updateRegistryTable();
         } else {
-            writeConsole("error", `[ERR] (status: ${response.status}) -> ${text}`);
+            writeConsole("error", `[ERR] (status: ${response.status}) -> ${text}${metaSuffix}`);
             if (response.status === 401 || response.status === 403) {
                 logout();
             }
@@ -243,7 +275,7 @@ function updateRegistryTable() {
         const cellActions = row.insertCell(3);
         cellActions.innerHTML = `
             <button onclick="quickQuery('${k}', 'GET')" class="op-btn get-btn" style="padding: 3px 8px; font-size: 0.75rem; margin-right: 5px;">GET</button>
-            <button onclick="quickQuery('${k}', 'DEL')" class="op-btn del-btn" style="padding: 3px 8px; font-size: 0.75rem;">DEL</button>
+            <button onclick="handleDelClick(this, '${k}')" class="op-btn del-btn" style="padding: 3px 8px; font-size: 0.75rem;">DEL</button>
         `;
     });
 }

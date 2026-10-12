@@ -21,6 +21,12 @@ message SetResponse {
   bool not_leader = 2;
   string leader_hint = 3;
   string error = 4;
+  // Dashboard visibility (Cluster Console) - shard the key hashed to, and how
+  // many of the cluster's nodes had replicated this write by the time it
+  // committed. -1/-1 in standalone mode (no replication to report).
+  int32 shard_id = 5;
+  int32 replicated_count = 6;
+  int32 cluster_size = 7;
 }
 
 message GetRequest {
@@ -31,6 +37,7 @@ message GetResponse {
   string val = 2;
   bool not_leader = 3;
   string leader_hint = 4;
+  int32 shard_id = 5;
 }
 
 message DeleteRequest {
@@ -41,6 +48,9 @@ message DeleteResponse {
   bool not_leader = 2;
   string leader_hint = 3;
   string error = 4;
+  int32 shard_id = 5;
+  int32 replicated_count = 6;
+  int32 cluster_size = 7;
 }
 
 service AetherClient {

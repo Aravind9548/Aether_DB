@@ -1,0 +1,47 @@
+// COPY of aether-engine/proto/admin.proto — keep these two files in sync
+// manually. Duplicated rather than shared via a restructured Docker build
+// context (see Phase B plan's scoping decision #2, same pattern client.proto
+// already documents).
+syntax = "proto3";
+package aether.admin;
+
+// Cluster introspection / chaos-demo RPCs, deliberately kept out of
+// AetherClient (client.proto) - these are not part of the SET/GET/DEL data
+// path, they exist for the dashboard's cluster view and demo tooling.
+
+option java_package = "aether.admin";
+option java_multiple_files = true;
+
+message Empty {}
+
+message StatusResponse {
+  string role = 1;          // "LEADER", "FOLLOWER", "CANDIDATE", or "STANDALONE"
+  uint64 term = 2;
+  uint64 commit_index = 3;
+  uint64 last_log_index = 4;
+  string leader_hint = 5;   // "host:port" of the current leader, or "unknown"
+}
+
+message KeyValue {
+  string key = 1;
+  string val = 2;
+  int32 shard_id = 3;
+}
+
+message ListKeysResponse {
+  repeated KeyValue entries = 1;
+}
+
+message KillSelfResponse {
+  bool acknowledged = 1;
+}
+
+service AetherAdmin {
+  rpc Status(Empty) returns (StatusResponse);
+  rpc ListKeys(Empty) returns (ListKeysResponse);
+  // Kills this process (SIGKILL) shortly after responding - a real,
+  // ungraceful crash, not a graceful shutdown, matching what `docker kill`
+  // does today. Unconditional: the caller (gateway) decides which node to
+  // target based on Status, this RPC does not check role itself.
+  rpc KillSelf(Empty) returns (KillSelfResponse);
+}

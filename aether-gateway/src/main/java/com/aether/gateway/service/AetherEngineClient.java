@@ -68,6 +68,12 @@ public class AetherEngineClient {
         }
     }
 
+    // Read-only view for ClusterAdminClient - single source of truth for the
+    // configured node list, no separate parsing of aether.engine.nodes.
+    public List<String> getClusterNodes() {
+        return Collections.unmodifiableList(clusterNodes);
+    }
+
     private AetherClientGrpc.AetherClientBlockingStub stubFor(String targetHost, int targetPort) {
         String key = targetHost + ":" + targetPort;
         ManagedChannel channel = channels.computeIfAbsent(key, k ->
@@ -101,7 +107,13 @@ public class AetherEngineClient {
         return true;
     }
 
-    public boolean set(String key, String val) throws IOException {
+    // Dashboard visibility (Cluster Console): shard_id/replicated_count/
+    // cluster_size straight from the engine's response - see client.proto.
+    public record SetResult(boolean ok, int shardId, int replicatedCount, int clusterSize) {}
+    public record GetResult(Optional<String> value, int shardId) {}
+    public record DeleteResult(boolean deleted, int shardId, int replicatedCount, int clusterSize) {}
+
+    public SetResult set(String key, String val) throws IOException {
         Set<String> visited = new HashSet<>();
         for (int attempt = 0; attempt < RETRIES; attempt++) {
             try {
@@ -114,7 +126,7 @@ public class AetherEngineClient {
                 if (!resp.getError().isEmpty()) {
                     throw new IOException("Engine operation failed: " + resp.getError());
                 }
-                return resp.getOk();
+                return new SetResult(resp.getOk(), resp.getShardId(), resp.getReplicatedCount(), resp.getClusterSize());
             } catch (StatusRuntimeException e) {
                 rotateToNextNode();
                 if (attempt == RETRIES - 1) {
@@ -126,7 +138,7 @@ public class AetherEngineClient {
         throw new IOException("Failed to send SET after " + RETRIES + " retries due to leader elections");
     }
 
-    public Optional<String> get(String key) throws IOException {
+    public GetResult get(String key) throws IOException {
         Set<String> visited = new HashSet<>();
         for (int attempt = 0; attempt < RETRIES; attempt++) {
             try {
@@ -136,7 +148,8 @@ public class AetherEngineClient {
                     followRedirect(resp.getLeaderHint(), visited);
                     continue;
                 }
-                return resp.getFound() ? Optional.of(resp.getVal()) : Optional.empty();
+                Optional<String> value = resp.getFound() ? Optional.of(resp.getVal()) : Optional.empty();
+                return new GetResult(value, resp.getShardId());
             } catch (StatusRuntimeException e) {
                 rotateToNextNode();
                 if (attempt == RETRIES - 1) {
@@ -148,7 +161,7 @@ public class AetherEngineClient {
         throw new IOException("Failed to send GET after " + RETRIES + " retries due to leader elections");
     }
 
-    public boolean delete(String key) throws IOException {
+    public DeleteResult delete(String key) throws IOException {
         Set<String> visited = new HashSet<>();
         for (int attempt = 0; attempt < RETRIES; attempt++) {
             try {
@@ -161,7 +174,7 @@ public class AetherEngineClient {
                 if (!resp.getError().isEmpty()) {
                     throw new IOException("Engine operation failed: " + resp.getError());
                 }
-                return resp.getDeleted();
+                return new DeleteResult(resp.getDeleted(), resp.getShardId(), resp.getReplicatedCount(), resp.getClusterSize());
             } catch (StatusRuntimeException e) {
                 rotateToNextNode();
                 if (attempt == RETRIES - 1) {

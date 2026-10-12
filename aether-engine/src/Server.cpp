@@ -1,8 +1,10 @@
 #include "Server.hpp"
 #include "Raft.hpp"
+#include "admin.grpc.pb.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <signal.h>
 #include <cstring>
 #include <thread>
 #include <iostream>
@@ -45,6 +47,9 @@ public:
         response->set_not_leader(r.not_leader);
         response->set_leader_hint(to_grpc_leader_hint(r.leader_hint));
         response->set_error(r.error);
+        response->set_shard_id(r.shard_id);
+        response->set_replicated_count(r.replicated_count);
+        response->set_cluster_size(r.cluster_size);
         return grpc::Status::OK;
     }
 
@@ -55,6 +60,7 @@ public:
         response->set_val(r.value.value_or(""));
         response->set_not_leader(r.not_leader);
         response->set_leader_hint(to_grpc_leader_hint(r.leader_hint));
+        response->set_shard_id(r.shard_id);
         return grpc::Status::OK;
     }
 
@@ -65,6 +71,66 @@ public:
         response->set_not_leader(r.not_leader);
         response->set_leader_hint(to_grpc_leader_hint(r.leader_hint));
         response->set_error(r.error);
+        response->set_shard_id(r.shard_id);
+        response->set_replicated_count(r.replicated_count);
+        response->set_cluster_size(r.cluster_size);
+        return grpc::Status::OK;
+    }
+
+private:
+    Server* server_;
+};
+
+// gRPC AetherAdmin service glue: cluster introspection + chaos-demo self-kill
+// for the dashboard's Cluster Console. Deliberately separate from
+// ClientServiceImpl above - these are not part of the SET/GET/DEL data path.
+class Server::AdminServiceImpl final : public aether::admin::AetherAdmin::Service {
+public:
+    explicit AdminServiceImpl(Server* server) : server_(server) {}
+
+    grpc::Status Status(grpc::ServerContext*, const aether::admin::Empty*,
+                        aether::admin::StatusResponse* response) override {
+        if (server_->raft) {
+            auto st = server_->raft->get_status();
+            response->set_role(raft_role_name(st.role));
+            response->set_term(st.term);
+            response->set_commit_index(st.commit_index);
+            response->set_last_log_index(st.last_log_index);
+            response->set_leader_hint(server_->raft->get_leader_address());
+        } else {
+            response->set_role("STANDALONE");
+            response->set_term(0);
+            response->set_commit_index(0);
+            response->set_last_log_index(0);
+            response->set_leader_hint("");
+        }
+        return grpc::Status::OK;
+    }
+
+    grpc::Status ListKeys(grpc::ServerContext*, const aether::admin::Empty*,
+                          aether::admin::ListKeysResponse* response) override {
+        auto& lock_manager = server_->engine.get_lock_manager();
+        for (const auto& [k, v] : lock_manager.get_all_pairs()) {
+            auto* entry = response->add_entries();
+            entry->set_key(k);
+            entry->set_val(v);
+            entry->set_shard_id(static_cast<int>(lock_manager.shard_of(k)));
+        }
+        return grpc::Status::OK;
+    }
+
+    grpc::Status KillSelf(grpc::ServerContext*, const aether::admin::Empty*,
+                          aether::admin::KillSelfResponse* response) override {
+        response->set_acknowledged(true);
+        // Detach a thread so this response actually reaches the caller before
+        // the process disappears. Real ungraceful crash (SIGKILL) - matches
+        // what `docker kill` does today, not the graceful SIGTERM path
+        // main.cpp's signal_handler already handles - Raft's crash-recovery
+        // guarantees are specifically about surviving crashes, not clean exits.
+        std::thread([]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            kill(getpid(), SIGKILL);
+        }).detach();
         return grpc::Status::OK;
     }
 
@@ -81,10 +147,12 @@ Server::~Server() {
 
 void Server::start_grpc_server() {
     grpc_service_ = std::make_unique<ClientServiceImpl>(this);
+    admin_service_ = std::make_unique<AdminServiceImpl>(this);
     std::string addr = "0.0.0.0:" + std::to_string(port + CLIENT_GRPC_PORT_OFFSET);
     grpc::ServerBuilder builder;
     builder.AddListeningPort(addr, grpc::InsecureServerCredentials());
     builder.RegisterService(grpc_service_.get());
+    builder.RegisterService(admin_service_.get());
     grpc_server_ = builder.BuildAndStart();
     if (!grpc_server_) {
         std::cerr << "Failed to start client gRPC server on " << addr << std::endl;
@@ -240,6 +308,7 @@ void Server::handle_client(int client_sock) {
 
 Server::ClientOpResult Server::do_set(const std::string& key, const std::string& val) {
     ClientOpResult r;
+    r.shard_id = static_cast<int>(engine.get_lock_manager().shard_of(key));
     try {
         if (raft) {
             auto res = raft->propose('S', key, val, propose_timeout_ms);
@@ -250,6 +319,8 @@ Server::ClientOpResult Server::do_set(const std::string& key, const std::string&
                 r.error = "TIMEOUT";
             } else {
                 r.ok = true;
+                r.replicated_count = res.replicated_count;
+                r.cluster_size = res.cluster_size;
             }
         } else {
             engine.set(key, val);
@@ -263,6 +334,7 @@ Server::ClientOpResult Server::do_set(const std::string& key, const std::string&
 
 Server::ClientOpResult Server::do_get(const std::string& key) {
     ClientOpResult r;
+    r.shard_id = static_cast<int>(engine.get_lock_manager().shard_of(key));
     if (raft) {
         auto status = raft->get_status();
         if (status.role != RaftRole::Leader) {
@@ -277,6 +349,7 @@ Server::ClientOpResult Server::do_get(const std::string& key) {
 
 Server::ClientOpResult Server::do_delete(const std::string& key) {
     ClientOpResult r;
+    r.shard_id = static_cast<int>(engine.get_lock_manager().shard_of(key));
     try {
         if (raft) {
             auto res = raft->propose('D', key, "", propose_timeout_ms);
@@ -290,6 +363,8 @@ Server::ClientOpResult Server::do_delete(const std::string& key) {
                 // existed" (propose() only reports commit success) — matches
                 // pre-existing text-protocol behavior of always returning "1".
                 r.ok = true;
+                r.replicated_count = res.replicated_count;
+                r.cluster_size = res.cluster_size;
             }
         } else {
             r.ok = engine.remove(key);

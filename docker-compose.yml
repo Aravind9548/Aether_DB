@@ -11,6 +11,16 @@ x-engine-common: &engine-common
   networks:
     - aether-mesh
   restart: always
+  # Without this, AetherDB runs as PID 1 of the container's own PID
+  # namespace - and a process that is PID 1 of its namespace is immune to
+  # signals it sends itself (including SIGKILL), a documented Linux kernel
+  # behavior (the exact reason Docker ships this flag). That immunity is
+  # what silently no-op'd the Cluster Console's "Kill Leader" self-kill RPC
+  # (KillSelf) - `docker kill` from the host still worked fine since that
+  # delivers the signal from outside the container's namespace. `init: true`
+  # runs Docker's built-in minimal init (docker-init/tini) as PID 1 instead,
+  # so AetherDB is an ordinary child process and self-SIGKILL works normally.
+  init: true
 
 services:
   aether-engine-1:
@@ -81,6 +91,11 @@ services:
       - SPRING_DATASOURCE_PASSWORD=secure_password_123
       - SPRING_DATA_REDIS_HOST=redis
       - SPRING_DATA_REDIS_PORT=6379
+      # Read from a local .env file (gitignored) - never hardcode real
+      # credentials here. Falls back to the app's own placeholder default
+      # if .env doesn't set them, so the stack still runs without them.
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-placeholder-client-id}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-placeholder-client-secret}
     depends_on:
       - aether-engine-1
       - aether-engine-2

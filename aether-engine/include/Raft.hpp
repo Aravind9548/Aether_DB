@@ -53,6 +53,11 @@ public:
     struct ProposeResult {
         ProposeStatus status;
         int leader_id; // hint for NOT_LEADER redirects; -1 if unknown
+        // Dashboard visibility: how many nodes (including self) had
+        // replicated this entry by the time it committed, and cluster size.
+        // Only meaningful when status == OK; -1/-1 otherwise.
+        int replicated_count = -1;
+        int cluster_size = -1;
     };
 
     // Appends op to the replicated log and blocks until it is committed and

@@ -80,6 +80,25 @@ add_custom_command(
     COMMENT "Generating gRPC/protobuf code from client.proto"
 )
 
+# Cluster admin/introspection RPCs (dashboard cluster view + chaos demo)
+set(ADMIN_PROTO_FILE ${CMAKE_SOURCE_DIR}/proto/admin.proto)
+set(ADMIN_PROTO_SRCS ${PROTO_GEN_DIR}/admin.pb.cc)
+set(ADMIN_PROTO_HDRS ${PROTO_GEN_DIR}/admin.pb.h)
+set(ADMIN_GRPC_SRCS ${PROTO_GEN_DIR}/admin.grpc.pb.cc)
+set(ADMIN_GRPC_HDRS ${PROTO_GEN_DIR}/admin.grpc.pb.h)
+
+add_custom_command(
+    OUTPUT ${ADMIN_PROTO_SRCS} ${ADMIN_PROTO_HDRS} ${ADMIN_GRPC_SRCS} ${ADMIN_GRPC_HDRS}
+    COMMAND ${PROTOC_EXECUTABLE}
+    ARGS --cpp_out=${PROTO_GEN_DIR}
+         --grpc_out=${PROTO_GEN_DIR}
+         --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN_EXECUTABLE}
+         -I ${CMAKE_SOURCE_DIR}/proto
+         ${ADMIN_PROTO_FILE}
+    DEPENDS ${ADMIN_PROTO_FILE}
+    COMMENT "Generating gRPC/protobuf code from admin.proto"
+)
+
 # Server executable sources
 set(SOURCES
     src/Engine.cpp
@@ -91,6 +110,8 @@ set(SOURCES
     ${RAFT_GRPC_SRCS}
     ${CLIENT_PROTO_SRCS}
     ${CLIENT_GRPC_SRCS}
+    ${ADMIN_PROTO_SRCS}
+    ${ADMIN_GRPC_SRCS}
 )
 
 # Headers for IDE visibility
@@ -104,6 +125,8 @@ set(HEADERS
     ${RAFT_GRPC_HDRS}
     ${CLIENT_PROTO_HDRS}
     ${CLIENT_GRPC_HDRS}
+    ${ADMIN_PROTO_HDRS}
+    ${ADMIN_GRPC_HDRS}
 )
 
 add_executable(AetherDB ${SOURCES} ${HEADERS})
@@ -122,6 +145,11 @@ target_link_libraries(wal_v2_test PRIVATE Threads::Threads)
 add_executable(client_grpc_test tests/client_grpc_test.cpp ${CLIENT_PROTO_SRCS} ${CLIENT_GRPC_SRCS})
 target_include_directories(client_grpc_test PRIVATE ${PROTO_GEN_DIR})
 target_link_libraries(client_grpc_test PRIVATE ${AETHER_PROTOBUF_LIB} ${AETHER_GRPCXX_LIB} Threads::Threads)
+
+# Admin gRPC smoke test (Cluster Console) - pure client, no engine/Raft deps needed
+add_executable(admin_grpc_test tests/admin_grpc_test.cpp ${ADMIN_PROTO_SRCS} ${ADMIN_GRPC_SRCS})
+target_include_directories(admin_grpc_test PRIVATE ${PROTO_GEN_DIR})
+target_link_libraries(admin_grpc_test PRIVATE ${AETHER_PROTOBUF_LIB} ${AETHER_GRPCXX_LIB} Threads::Threads)
 
 # TSAN Sanitizer configuration
 if(ENABLE_TSAN)

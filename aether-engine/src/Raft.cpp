@@ -321,7 +321,18 @@ RaftNode::ProposeResult RaftNode::propose(char op, const std::string& key, const
     if (role != RaftRole::Leader) {
         return {ProposeStatus::NOT_LEADER, leader_id};
     }
-    return {ProposeStatus::OK, leader_id};
+
+    // Dashboard visibility: snapshot how many nodes (self + peers whose
+    // match_index has reached this entry) had actually replicated it by the
+    // moment it committed. This is informational only, computed after the
+    // commit-wait above already resolved via the real majority-commit path.
+    int replicated = 1; // self
+    for (size_t i = 0; i < match_index.size(); ++i) {
+        if (match_index[i] >= entry_index) replicated++;
+    }
+    int cluster_size = static_cast<int>(peers.size()) + 1;
+
+    return {ProposeStatus::OK, leader_id, replicated, cluster_size};
 }
 
 // ---------- timers ----------

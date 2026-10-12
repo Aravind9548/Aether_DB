@@ -28,7 +28,7 @@ public class SecurityConfig {
             .csrf(csrf -> csrf.disable())
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED))
             .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/auth/**", "/login/oauth2/**", "/oauth2/**", "/", "/index.html", "/style.css", "/app.js", "/favicon.ico").permitAll()
+                .requestMatchers("/auth/**", "/login/oauth2/**", "/oauth2/**", "/", "/index.html", "/style.css", "/app.js", "/favicon.ico", "/cluster.html", "/cluster.js").permitAll()
                 .anyRequest().authenticated()
             )
             .oauth2Login(oauth2 -> oauth2

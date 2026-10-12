@@ -59,6 +59,12 @@ public:
         }
     }
 
+    // Which shard a key routes to - exposed read-only so callers (e.g. the
+    // admin/status path) can report it without duplicating the hash-mod math.
+    size_t shard_of(const std::string& key) const {
+        return get_shard_index(key);
+    }
+
 private:
     struct Shard {
         std::unordered_map<std::string, std::string> map;

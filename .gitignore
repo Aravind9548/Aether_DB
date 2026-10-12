@@ -13,6 +13,9 @@ aether.aof
 # Local binaries
 AetherDB
 
+# Local secrets (Google OAuth client id/secret, etc.) - never commit these
+.env
+
 # IDE / system files
 .vs/
 .vscode/

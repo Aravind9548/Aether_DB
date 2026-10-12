@@ -38,6 +38,12 @@ private:
         std::string leader_hint;
         std::optional<std::string> value; // GET only; has_value() == found
         std::string error;
+        // Dashboard visibility: which shard the key routes to (always set),
+        // and how many nodes had replicated a SET/DEL by the time it
+        // committed (-1/-1 for GET, or in standalone/no-raft mode).
+        int shard_id = -1;
+        int replicated_count = -1;
+        int cluster_size = -1;
     };
 
     ClientOpResult do_set(const std::string& key, const std::string& val);
@@ -50,6 +56,9 @@ private:
     // gRPC AetherClient service; defined in Server.cpp. Has access to
     // Server's private do_set/do_get/do_delete via nested-class member access.
     class ClientServiceImpl;
+    // gRPC AetherAdmin service (cluster status / key listing / chaos-demo
+    // self-kill) - separate service from AetherClient, same server/port.
+    class AdminServiceImpl;
     void start_grpc_server();
     void stop_grpc_server();
 
@@ -65,6 +74,7 @@ private:
     std::mutex clients_mutex;
 
     std::unique_ptr<ClientServiceImpl> grpc_service_;
+    std::unique_ptr<AdminServiceImpl> admin_service_;
     std::unique_ptr<grpc::Server> grpc_server_;
     std::thread grpc_server_thread_;
 };

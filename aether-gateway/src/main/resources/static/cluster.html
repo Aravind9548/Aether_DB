@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AetherDB Cluster &amp; Chaos Console</title>
+    <!-- Outfit, Inter & JetBrains Mono Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Inter:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="background-glow"></div>
+
+    <!-- Navigation -->
+    <nav class="navbar">
+        <div class="nav-container">
+            <span class="logo">Aether<span class="logo-accent">DB</span></span>
+            <div class="nav-links">
+                <a href="index.html" class="nav-link-btn">← Back to Dashboard</a>
+            </div>
+            <div class="user-status" id="user-status-area">
+                <span class="status-indicator online"></span>
+                <span class="status-text font-mono" id="tenant-display">Active: tenant</span>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Container -->
+    <main class="main-container dashboard-section">
+        
+        <!-- Node Topology Section -->
+        <div class="card-header" style="margin-top: 1rem; margin-bottom: 1rem;">
+            <h2>Raft Cluster Topology</h2>
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <span class="live-indicator"><span class="live-dot"></span>POLLING (2s)</span>
+                <button id="kill-leader-btn" class="op-btn del-btn" style="max-width: 160px; padding: 8px 16px;">Kill Leader</button>
+            </div>
+        </div>
+        
+        <div class="topology-container" id="topology-view">
+            <!-- Node cards injected here -->
+            <div style="grid-column: span 3; text-align: center; padding: 2rem;" class="text-muted">
+                Initializing cluster status view...
+            </div>
+        </div>
+
+        <div class="dashboard-grid">
+            <!-- Batch Operations Panel -->
+            <div class="dashboard-card glass-panel span-2-col">
+                <div class="card-header">
+                    <h3>Batch Operations</h3>
+                    <span class="badge badge-accent">Multi-Key Write Loop</span>
+                </div>
+                
+                <div class="ops-form">
+                    <div class="batch-rows" id="batch-rows-container">
+                        <!-- Key Value rows injected here -->
+                        <div class="batch-row">
+                            <div class="input-group flex-1">
+                                <label>Key</label>
+                                <input type="text" class="batch-key-input" placeholder="e.g. batch_key_1">
+                            </div>
+                            <div class="input-group flex-2">
+                                <label>Value</label>
+                                <input type="text" class="batch-value-input" placeholder="Value to store">
+                            </div>
+                            <button type="button" class="batch-remove-btn" onclick="removeBatchRow(this)">×</button>
+                        </div>
+                    </div>
+
+                    <div class="batch-actions">
+                        <button type="button" onclick="addBatchRow()" class="op-btn get-btn" style="flex: none; width: 140px;">+ Add Row</button>
+                        <button type="button" onclick="loadSampleKeys()" class="op-btn get-btn" style="flex: none; width: 180px;">Load 10 Sample Keys</button>
+                        <button type="button" onclick="runBatch()" class="op-btn set-btn">Run Batch Operations</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Telemetry / Operations log for Batch actions -->
+            <div class="dashboard-card glass-panel card-secondary">
+                <div class="card-header">
+                    <h3>Batch Execution Log</h3>
+                </div>
+                <div class="telemetry-stats" id="batch-execution-log" style="max-height: 250px; overflow-y: auto; font-family: var(--font-mono); font-size: 0.8rem; display: flex; flex-direction: column; gap: 0.5rem;">
+                    <div class="text-muted">No batch run executed in this view session yet.</div>
+                </div>
+            </div>
+
+            <!-- Key Browser Panel -->
+            <div class="dashboard-card glass-panel span-3-col card-secondary">
+                <div class="card-header">
+                    <div>
+                        <h3>Tenant Key Browser</h3>
+                        <p class="subtitle">Real-time scan of all keys mapped in your isolated workspace</p>
+                    </div>
+                    <button onclick="refreshKeyBrowser()" class="op-btn get-btn" style="max-width: 120px; padding: 6px 14px;">Refresh</button>
+                </div>
+                <div class="table-container">
+                    <table class="data-table" id="browser-table">
+                        <thead>
+                            <tr>
+                                <th>Key</th>
+                                <th>Value</th>
+                                <th>Routing Shard</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr id="browser-empty-row">
+                                <td colspan="3" class="text-center text-muted">No records found. Click Refresh to query the cluster.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <script src="common.js"></script>
+    <script src="cluster.js"></script>
+</body>
+</html>
