@@ -94,6 +94,8 @@ services:
       # Read from a local .env file (gitignored) - never hardcode real
       # credentials here. Falls back to the app's own placeholder default
       # if .env doesn't set them, so the stack still runs without them.
+      # Required - compose refuses to start the stack without it.
+      - AETHER_JWT_SECRET=${AETHER_JWT_SECRET:?set AETHER_JWT_SECRET in .env (openssl rand -hex 32)}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-placeholder-client-id}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-placeholder-client-secret}
     depends_on:
