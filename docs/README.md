@@ -13,6 +13,7 @@ as a local website with [VitePress](https://vitepress.dev).
 | [Design decisions](./design-decisions.md) | What was chosen over what, and why |
 | [API reference](./api.md) | REST endpoints, engine commands, gRPC services |
 | [Configuration & operations](./operations.md) | Settings, health checks, backup and restore |
+| [Deployment](./deployment.md) | How the live site is hosted (Vercel + Google Cloud), and how to redeploy |
 | [Testing](./testing.md) | Test suites, partition testing, linearizability checking |
 | [Findings](./findings.md) | The three Raft bugs partition testing found |
 | [Limitations & roadmap](./limitations.md) | What's missing, and what's next |

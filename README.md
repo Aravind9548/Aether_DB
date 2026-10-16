@@ -23,6 +23,8 @@ flowchart LR
 - **aether-engine**: the sharded, write-ahead-logged storage engine, replicated across three nodes with Raft, on a private Docker network that isn't reachable from the host.
 - **postgres**: user accounts, with passwords hashed with BCrypt. **redis**: rate-limit buckets for the login endpoints.
 
+🌐 **Live demo:** **https://aetherdb.vercel.app**: the dashboard on Vercel, backed by the real 3-node cluster on Google Cloud ([how it's hosted](docs/deployment.md)).
+
 📖 **Documentation:** [`docs/`](docs/README.md): architecture, Raft internals, API reference, operations, testing and findings.
 
 > **Setup note:** the gateway needs `AETHER_JWT_SECRET` in a gitignored `.env` file (generate one with `openssl rand -hex 32`). See [Getting started](docs/getting-started.md).

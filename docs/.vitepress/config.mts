@@ -41,7 +41,8 @@ export default withMermaid(
           text: 'Reference',
           items: [
             { text: 'API reference', link: '/api' },
-            { text: 'Configuration & operations', link: '/operations' }
+            { text: 'Configuration & operations', link: '/operations' },
+            { text: 'Deployment', link: '/deployment' }
           ]
         },
         {

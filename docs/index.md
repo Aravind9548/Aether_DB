@@ -1,5 +1,7 @@
 # AetherDB
 
+**Live demo: https://aetherdb.vercel.app** (register an account, then try the Cluster Console's Kill Leader)
+
 AetherDB is a distributed key-value database built from scratch. A C++17
 storage engine runs as a **3-node cluster** that stays consistent using the
 **Raft** consensus algorithm. A **Spring Boot gateway** in front handles
@@ -50,6 +52,7 @@ and re-verified in one clean end-to-end run.
 | Understand the design | [Architecture](./architecture.md), [Consensus (Raft)](./raft.md), [Request flows](./flows.md) |
 | Call the API | [API reference](./api.md) |
 | Configure or operate it | [Configuration & operations](./operations.md) |
+| See how it's deployed | [Deployment](./deployment.md) |
 | See how it was verified | [Testing](./testing.md), [Findings](./findings.md) |
 | Know what's missing | [Limitations & roadmap](./limitations.md) |
 | Look up a term | [Glossary](./glossary.md) |
