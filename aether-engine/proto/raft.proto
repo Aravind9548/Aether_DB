@@ -15,7 +15,7 @@ message RequestVoteRequest {
   int32 candidate_id = 2;
   uint64 last_log_index = 3;
   uint64 last_log_term = 4;
-  // PreVote (Raft thesis ง9.6): a probe round that asks "would you vote for
+  // PreVote (Raft thesis ยง9.6): a probe round that asks "would you vote for
   // me at term+1?" without anyone changing state. A node cut off by a
   // partition never wins one, so its term never inflates while isolated and
   // it cannot depose a healthy leader when the partition heals.

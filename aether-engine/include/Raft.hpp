@@ -68,7 +68,7 @@ public:
     ProposeResult propose(char op, const std::string& key, const std::string& val,
                           int timeout_ms);
 
-    // ReadIndex (Raft thesis ง6.4): returns OK only once this node has proven
+    // ReadIndex (Raft thesis ยง6.4): returns OK only once this node has proven
     // it is still the leader *after* the call began - a heartbeat round sent
     // after the call started was acknowledged by a majority, and an entry
     // from its own term is committed. Reading the state machine after OK is

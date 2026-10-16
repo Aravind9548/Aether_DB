@@ -5,7 +5,7 @@
 #
 # Usage:  BACKEND_HOST=34-100-1-2.sslip.io bash deploy/deploy-frontend.sh
 set -euo pipefail
-: "${BACKEND_HOST:?set BACKEND_HOST to the backend's hostname, e.g. 34-100-1-2.sslip.io}"
+: "${BACKEND_HOST:?set BACKEND_HOST to the backend hostname, e.g. 34-100-1-2.sslip.io}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/deploy/.frontend-build"
 
