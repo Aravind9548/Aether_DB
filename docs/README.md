@@ -1,5 +1,7 @@
 # AetherDB documentation
 
+**Live site: https://aetherdb-docs-teal.vercel.app**
+
 These pages read directly on GitHub, and the same files build the docs
 website with [VitePress](https://vitepress.dev).
 
