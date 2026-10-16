@@ -1,0 +1,35 @@
+# Production overlay for a single VM: the backend that the Vercel-hosted
+# dashboard talks to.
+#
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml up -d --build
+#
+# Changes from docker-compose.yml:
+#   - The gateway is no longer published on the host. Caddy is the only
+#     public entry point (ports 80/443) and gets a TLS certificate
+#     automatically, so traffic from Vercel to here is encrypted.
+#   - SITE_ADDRESS (from .env) is the public hostname Caddy serves, e.g.
+#     34-100-1-2.sslip.io.
+services:
+  api-gateway:
+    ports: !reset []
+
+  caddy:
+    image: caddy:2.8
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - SITE_ADDRESS=${SITE_ADDRESS:?set SITE_ADDRESS in .env}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - aether-mesh
+    depends_on:
+      - api-gateway
+
+volumes:
+  caddy_data:
+  caddy_config:

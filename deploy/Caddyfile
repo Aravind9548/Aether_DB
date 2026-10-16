@@ -1,0 +1,6 @@
+# HTTPS front door for the gateway. Caddy obtains and renews the Let's
+# Encrypt certificate for SITE_ADDRESS automatically.
+{$SITE_ADDRESS} {
+	encode gzip
+	reverse_proxy api-gateway:8080
+}

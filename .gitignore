@@ -26,3 +26,7 @@ AetherDB
 
 # Partition / linearizability test output (scripts/partition_test.py)
 chaos-results/
+
+# Frontend deploy staging and Vercel link (deploy/deploy-frontend.sh)
+deploy/.frontend-build/
+deploy/.vercel/
