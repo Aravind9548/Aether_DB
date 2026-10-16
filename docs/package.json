@@ -1,0 +1,16 @@
+{
+  "name": "aetherdb-docs",
+  "private": true,
+  "type": "module",
+  "description": "AetherDB documentation site (VitePress). The Markdown pages also read directly on GitHub.",
+  "scripts": {
+    "dev": "vitepress dev",
+    "build": "vitepress build",
+    "preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "mermaid": "11.17.2",
+    "vitepress": "1.6.4",
+    "vitepress-plugin-mermaid": "2.0.17"
+  }
+}

@@ -6,26 +6,26 @@ AetherDB-Platform is a production-grade, highly concurrent, secure, and persiste
 
 ## 🏗️ System Architecture & Data Flow
 
-```
-[HTTP Client] ──(JSON over HTTPS)──> [Spring Boot API Service]
-                                              │
-                                              ├── (1. Authentication via Spring Security/JWT)
-                                              ├── (2. Multi-tenant key prefix isolation)
-                                              ▼
-                                    [Java Socket Client Pool]
-                                     (leader-aware routing)
-                                              │
-                                       (Raw TCP Bytes)
-                                              ▼
-                          ┌────────────[Raft Cluster]────────────┐
-                          │  [engine-1]   [engine-2]  [engine-3] │
-                          │      └── AppendEntries / votes ──┘   │
-                          └──────────────────────────────────────┘
+```mermaid
+flowchart LR
+  U["HTTP client / dashboard"] -- "HTTP + JWT" --> G["Spring Boot gateway<br/>JWT + Google OAuth, tenant isolation,<br/>rate limiting, leader-aware routing"]
+  G --> PG[("PostgreSQL<br/>users")]
+  G --> RD[("Redis<br/>rate limits")]
+  G -- "gRPC" --> E1
+  subgraph RC["Raft cluster (C++17)"]
+    E1["engine-1"] <-- "AppendEntries / votes /<br/>InstallSnapshot (gRPC)" --> E2["engine-2"]
+    E1 <--> E3["engine-3"]
+    E2 <--> E3
+  end
 ```
 
-- **aether-gateway**: Acts as the single entry point. It handles user authentication, generates JWTs, and acts as a secure reverse proxy that sanitizes user queries and routes them to the C++ core engine.
-- **aether-engine**: The core in-memory sharded storage database, running inside a private Docker bridge network isolated from the host.
-- **postgres**: Stores user registration details and credentials hashed with BCrypt.
+- **aether-gateway**: the single entry point. Handles authentication and issues JWTs, keeps each tenant's keys separate, and routes requests over gRPC to the current Raft leader.
+- **aether-engine**: the sharded, write-ahead-logged storage engine, replicated across three nodes with Raft, on a private Docker network that isn't reachable from the host.
+- **postgres**: user accounts, with passwords hashed with BCrypt. **redis**: rate-limit buckets for the login endpoints.
+
+📖 **Full documentation:** [`docs/`](docs/README.md): architecture, Raft internals, API reference, operations, testing and findings.
+
+> **Setup note:** the gateway needs `AETHER_JWT_SECRET` in a gitignored `.env` file (generate one with `openssl rand -hex 32`). See [Getting started](docs/getting-started.md).
 
 ---
 
@@ -166,11 +166,15 @@ Sample real results: **90.5 ops/sec** before the group-commit fsync optimization
 - Docker & Docker Compose
 
 ### Step 1: Start the Platform
-Navigate to the root directory containing the `docker-compose.yml` and execute:
+First create a `.env` file in the repository root (it is gitignored) with a JWT signing secret; the stack refuses to start without one:
 ```bash
-docker-compose up --build
+echo "AETHER_JWT_SECRET=$(openssl rand -hex 32)" >> .env
 ```
-This builds and starts the C++ database engine, the PostgreSQL instance, and the Spring Boot API Gateway.
+Then, from the directory containing `docker-compose.yml`:
+```bash
+docker compose up --build
+```
+This builds and starts the three engine nodes, PostgreSQL, Redis and the Spring Boot API gateway.
 
 ### Step 2: Register a Tenant
 ```bash
