@@ -1,9 +1,7 @@
 # AetherDB documentation
 
-**Live site: https://aetherdb-docs-teal.vercel.app**
-
-These pages read directly on GitHub, and the same files build the docs
-website with [VitePress](https://vitepress.dev).
+These pages read directly on GitHub. The same files can also be previewed
+as a local website with [VitePress](https://vitepress.dev).
 
 | Page | Covers |
 |---|---|
@@ -28,5 +26,3 @@ npm install
 npm run dev      # local preview at http://localhost:5173
 npm run build    # static site in docs/.vitepress/dist
 ```
-
-Deployed on Vercel with `docs` as the project root (see `vercel.json`).
